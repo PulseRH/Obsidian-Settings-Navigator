@@ -1,34 +1,48 @@
-# Settings Back and Forth
+# Settings Navigator
 
-An Obsidian plugin that adds back and forth navigation arrows to the settings sidebar header, allowing you to easily navigate between different settings menus.
+An Obsidian plugin that adds browser-style navigation, quick plugin management, and quality-of-life improvements to the Settings modal.
 
 ## Features
 
-- **Back Arrow (←)**: Navigate to the previous settings tab you visited
-- **Forward Arrow (→)**: Navigate to the next settings tab in your history
-- **History Tracking**: Automatically tracks your navigation history through settings tabs
-- **Visual Feedback**: Buttons are disabled/grayed out when navigation isn't possible
+### Navigation
+- **Back/Forward buttons** - floating navigation bar above the settings modal, works like a browser's history
+- **Keyboard shortcuts** - `Ctrl+Z` (back) and `Ctrl+X` (forward) while settings are open
+- **Mouse 4/5 support** - use your mouse back/forward buttons to navigate
+- **History indicator** - shows your current position in the navigation history (e.g. `3/10`)
+- **Clickable section headers** - click "Core plugins" or "Community plugins" headings to jump to those tabs
+
+### Plugin Management
+- **Quick disable buttons** - hover over any plugin in the sidebar to reveal an X button that disables it
+- **Shift+Click to delete** - hold Shift and click the X to fully uninstall a community plugin (tooltip turns red to confirm)
+- **Browse in Community Plugins** - hover to reveal a puzzle icon that opens the plugin's page in the Community Plugins browser
+
+### Persistence
+- **Scroll position caching** - remembers where you scrolled on each settings tab and restores it when you return
+- **Search bar persistence** - remembers the "Search installed plugins..." filter text across tab switches
+
+### Appearance
+- **Transparent navigation bar mode** - optional setting that makes the nav bar background transparent with individually styled buttons
+
+## Settings
+
+All features can be toggled individually in the plugin's settings tab:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Quick disable/delete buttons | Show X buttons on plugin tabs | On |
+| Browse in Community Plugins buttons | Show puzzle icon on community plugin tabs | On |
+| Transparent navigation bar | Transparent bar with individual button backgrounds | Off |
+| Remember scroll positions | Cache and restore scroll positions per tab | On |
+| Remember plugin search filter | Persist the search bar text | On |
 
 ## Installation
 
 1. Copy this folder to your `.obsidian/plugins/` directory
-2. **Important**: Make sure you're in the project directory before running npm commands:
-   ```powershell
-   cd "C:\Code Projects\obsidian addons\Settings Back and fourth"
-   ```
-   Or use the helper scripts:
-   - PowerShell: `.\npm-safe.ps1 install`
-   - Command Prompt: `npm-safe.cmd install`
-3. Run `npm install` to install dependencies
-4. Run `npm run build` to build the plugin
-5. Enable the plugin in Obsidian's settings under "Community plugins"
+2. Run `npm install` to install dependencies
+3. Run `npm run build` to build the plugin
+4. Enable the plugin in Obsidian's settings under "Community plugins"
 
 ## Development
 
 - `npm run dev` - Build in development mode with watch
 - `npm run build` - Build for production
-
-## Usage
-
-Once enabled, you'll see back (←) and forward (→) arrows in the settings sidebar header. Click them to navigate through your settings navigation history, just like a web browser's back/forward buttons.
-
