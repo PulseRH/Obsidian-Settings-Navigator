@@ -1,0 +1,134 @@
+.settings-nav-floating-pane {
+    position: fixed;
+    display: none;
+    flex-direction: row; /* Horizontal layout for top docking */
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-s);
+    z-index: var(--layer-modal) + 10;
+    pointer-events: auto;
+}
+
+.settings-nav-float-button {
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    color: var(--text-muted);
+}
+
+.settings-nav-float-button:hover {
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+}
+
+.settings-nav-float-button.is-disabled {
+    opacity: 0.2;
+    pointer-events: none;
+}
+
+.settings-nav-separator {
+    width: 1px;
+    height: 16px;
+    background: var(--background-modifier-border);
+    margin: 0 2px;
+    flex-shrink: 0;
+}
+
+.settings-nav-indicator {
+    font-size: 11px;
+    color: var(--text-faint);
+    font-weight: 600;
+    font-family: var(--font-monospace);
+    margin-left: 4px;
+}
+
+/* X Button on sidebar nav items */
+.settings-nav-x-button {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    color: transparent;
+    cursor: default;
+    z-index: 10;
+}
+
+.settings-nav-x-button:hover {
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.settings-nav-x-button.shift-held {
+    color: var(--text-error);
+    cursor: pointer;
+}
+
+.settings-nav-x-button svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Browse button on sidebar nav items (left of X) */
+.settings-nav-browse-button {
+    position: absolute;
+    right: 28px;
+    top: 0;
+    bottom: 0;
+    width: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    color: transparent;
+    cursor: default;
+    z-index: 10;
+}
+
+.settings-nav-browse-button:hover {
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.settings-nav-browse-button svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* Transparent nav bar mode */
+.settings-nav-floating-pane.mod-transparent .settings-nav-float-button {
+    background: color-mix(in srgb, var(--background-secondary) 20%, transparent);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+}
+
+.settings-nav-floating-pane.mod-transparent .settings-nav-float-button:hover {
+    background: var(--background-modifier-hover);
+}
+
+.settings-nav-floating-pane.mod-transparent .settings-nav-float-button.is-disabled {
+    background: color-mix(in srgb, var(--background-secondary) 20%, transparent);
+    opacity: 0.3;
+}
+
+.settings-nav-floating-pane.mod-transparent .settings-nav-indicator {
+    background: transparent;
+    border: none;
+    padding: 4px 8px;
+}
+
+.settings-nav-floating-pane.mod-transparent .settings-nav-separator {
+    display: none;
+}
+
