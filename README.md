@@ -19,6 +19,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 ### Persistence
 - **Scroll position caching** - remembers where you scrolled on each settings tab and restores it when you return
 - **Search bar persistence** - remembers the "Search installed plugins..." filter text across tab switches
+- **Remembers Style Settings Folding/Ufolding
 
 ### Appearance
 - **Transparent navigation bar mode** - optional setting that makes the nav bar background transparent with individually styled buttons
