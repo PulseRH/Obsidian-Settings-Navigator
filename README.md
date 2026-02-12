@@ -7,7 +7,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 ### Navigation
 - **Back/Forward buttons** - floating navigation bar above the settings modal, works like a browser's history
 - **Keyboard shortcuts** - `Ctrl+Z` (back) and `Ctrl+X` (forward) while settings are open
-- **Mouse 4/5 support** - use your mouse back/forward buttons to navigate
+- **Mouse 3/4 support** - use your mouse back/forward buttons to navigate
 - **History indicator** - shows your current position in the navigation history (e.g. `3/10`)
 - **Clickable section headers** - click "Core plugins" or "Community plugins" headings to jump to those tabs
 
