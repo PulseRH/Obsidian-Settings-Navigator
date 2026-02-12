@@ -49,6 +49,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true };
 	private injectedXButtons: WeakSet<HTMLElement> = new WeakSet();
 	private scrollCache: Map<string, number> = new Map();
+	private foldStateCache: Map<string, string[]> = new Map();
 	savedSearchQuery: string = '';
 	private searchBarRestored: boolean = false;
 	private searchBarRestoring: boolean = false;
@@ -419,7 +420,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				}
 			}
 
-			// Continuously save scroll position for current tab
+			// Continuously save scroll position and fold state for current tab
 			if (this.lastActiveTabId && this.settings.cacheScrollPositions) {
 				// Don't overwrite while a restore is in progress for this tab
 				const restoreKey = `__restoring_${this.lastActiveTabId}`;
@@ -429,6 +430,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 						this.scrollCache.set(this.lastActiveTabId, contentEl.scrollTop);
 					}
 				}
+				this.saveFoldState(this.lastActiveTabId);
 			}
 
 			// Search bar: save when on community-plugins, restore on first visit
@@ -603,8 +605,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.savePluginData();
 		this.updateButtonStates();
 
-		// Restore scroll position for the tab we just navigated to
+		// Restore scroll position and fold state for the tab we just navigated to
 		this.restoreScrollPosition(normalizedId);
+		this.restoreFoldState(normalizedId);
 	}
 
 	private navigateBack() {
@@ -715,9 +718,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				let browseModal = topmostModal?.querySelector('.community-modal-search-container, .community-plugin-search') || isCommunityModal;
 
 				const attemptClick = (modal: HTMLElement, name: string, id?: string | null) => {
-					// First try to find by plugin ID
+					// First try to find by plugin ID (data attribute only, NOT href links)
 					if (id) {
-						const idElement = modal.querySelector(`[data-plugin-id="${id}"], a[href*="${id}"]`) as HTMLElement;
+						const idElement = modal.querySelector(`[data-plugin-id="${id}"]`) as HTMLElement;
 						if (idElement) {
 							idElement.click();
 							return true;
@@ -867,8 +870,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.lastActiveTabId = tabId;
 		this.updateButtonStates();
 
-		// Restore scroll position and search bar for the tab we navigated to
+		// Restore scroll position, fold state, and search bar for the tab we navigated to
 		this.restoreScrollPosition(tabId);
+		this.restoreFoldState(tabId);
 		if (this.isCommunityPluginsTab(tabId)) {
 			this.restoreSearchBarContent();
 		}
@@ -958,6 +962,100 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			}
 		};
 		setTimeout(() => tryRestore(15), 50);
+	}
+
+	private getHeadingPath(heading: HTMLElement): string {
+		// Build a path key from heading text, walking up the DOM to build ancestry
+		const text = heading.querySelector('.setting-item-name')?.textContent?.trim()
+			|| heading.textContent?.trim() || '';
+		const level = heading.getAttribute('data-level') || '0';
+		return `${level}:${text}`;
+	}
+
+	private saveFoldState(tabId: string) {
+		if (!this.settings.cacheScrollPositions || !tabId) return;
+		const contentEl = this.getSettingsContentEl();
+		if (!contentEl) return;
+
+		const headings = contentEl.querySelectorAll('.style-settings-heading');
+		if (headings.length === 0) return;
+
+		// Save ALL heading states (both collapsed and expanded) so we can
+		// detect which ones the user explicitly expanded vs default state
+		const states: { key: string; collapsed: boolean }[] = [];
+		const keyCounts = new Map<string, number>();
+		headings.forEach((h) => {
+			const baseKey = this.getHeadingPath(h as HTMLElement);
+			const count = keyCounts.get(baseKey) || 0;
+			keyCounts.set(baseKey, count + 1);
+			const key = count > 0 ? `${baseKey}#${count}` : baseKey;
+			states.push({ key, collapsed: h.classList.contains('is-collapsed') });
+		});
+		this.foldStateCache.set(tabId, states.filter(s => !s.collapsed).map(s => s.key));
+	}
+
+	private restoreFoldState(tabId: string) {
+		if (!this.settings.cacheScrollPositions || !tabId) return;
+		const expandedKeys = this.foldStateCache.get(tabId);
+		if (!expandedKeys) return;
+
+		const expandedSet = new Set(expandedKeys);
+
+		// Restore level by level: expand top-level headings first,
+		// wait for children to render, then process the next level
+		const restoreLevel = (level: number, attempts: number) => {
+			const contentEl = this.getSettingsContentEl();
+			if (!contentEl) {
+				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
+				return;
+			}
+
+			const headings = contentEl.querySelectorAll('.style-settings-heading');
+			if (headings.length === 0) {
+				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
+				return;
+			}
+
+			let clickedAny = false;
+			const keyCounts = new Map<string, number>();
+
+			headings.forEach((h) => {
+				const el = h as HTMLElement;
+				const headingLevel = parseInt(el.getAttribute('data-level') || '0');
+				if (headingLevel !== level) return;
+
+				const baseKey = this.getHeadingPath(el);
+				const count = keyCounts.get(baseKey) || 0;
+				keyCounts.set(baseKey, count + 1);
+				const key = count > 0 ? `${baseKey}#${count}` : baseKey;
+
+				const shouldExpand = expandedSet.has(key);
+				const isCollapsed = el.classList.contains('is-collapsed');
+
+				if (shouldExpand && isCollapsed) {
+					el.click();
+					clickedAny = true;
+				} else if (!shouldExpand && !isCollapsed) {
+					el.click();
+					clickedAny = true;
+				}
+			});
+
+			// If we expanded any headings, wait for children to render, then do next level
+			if (clickedAny && level < 6) {
+				setTimeout(() => restoreLevel(level + 1, 5), 150);
+			} else if (level < 6) {
+				// Check if there are deeper levels to process
+				const hasDeeper = Array.from(headings).some(h =>
+					parseInt((h as HTMLElement).getAttribute('data-level') || '0') > level
+				);
+				if (hasDeeper) {
+					restoreLevel(level + 1, 5);
+				}
+			}
+		};
+
+		setTimeout(() => restoreLevel(0, 10), 100);
 	}
 
 	private findSearchInput(): HTMLInputElement | null {
