@@ -108,7 +108,6 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.mouseHandler = (e: MouseEvent) => {
 			// button 3 = Mouse4 (back), button 4 = Mouse5 (forward)
 			if (e.button !== 3 && e.button !== 4) return;
-			console.log('[Settings Nav] Mouse button pressed:', e.button);
 			const settingsOpen = document.querySelector('.modal-container .modal');
 			if (!settingsOpen) return;
 			e.preventDefault();
@@ -689,124 +688,30 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				const target = parts[0]; // Plugin name
 				const pluginId = parts.length > 1 ? parts[1] : null; // Plugin ID if available
 
-				let topmostModal = getTopmostModal();
-
-				// Check if we're already in the community browse modal
-				const isCommunityModal = topmostModal?.querySelector('.mod-community-modal, .community-modal, .mod-community-plugin');
-				if (!topmostModal || !isCommunityModal) {
-					setting.openTabById('community-plugins');
-					setTimeout(() => {
-						const newTop = getTopmostModal();
-						const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
-							.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
-						if (browseBtn) {
-							browseBtn.click();
-							setTimeout(() => this.performNavigation(tabId), 500);
-						}
-					}, 300);
-					return;
-				}
-
-				// Check if we're currently in a details view - if so, go back to browse first
-				const detailsView = topmostModal?.querySelector('.community-modal-details, .community-plugin-details');
-				if (detailsView && !isQuery) {
-					const backBtn = topmostModal.querySelector('.modal-title-back, .setting-editor-back-button') as HTMLElement;
-					if (backBtn) {
-						backBtn.click();
-						// Wait for browse view to load, then navigate
-						setTimeout(() => this.performNavigation(tabId), 500);
+				if (!isQuery && pluginId) {
+					// Use Obsidian's native URI to open the plugin info modal
+					window.open(`obsidian://show-plugin?id=${pluginId}`);
+				} else if (isQuery) {
+					// For search queries, we need to interact with the browse modal search
+					let topmostModal = getTopmostModal();
+					const isCommunityModal = topmostModal?.querySelector('.mod-community-modal, .community-modal, .mod-community-plugin');
+					if (!topmostModal || !isCommunityModal) {
+						setting.openTabById('community-plugins');
+						setTimeout(() => {
+							const newTop = getTopmostModal();
+							const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
+								.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
+							if (browseBtn) {
+								browseBtn.click();
+								setTimeout(() => this.performNavigation(tabId), 500);
+							}
+						}, 300);
 						return;
 					}
-				}
-
-				let browseModal = topmostModal?.querySelector('.community-modal-search-container, .community-plugin-search') || isCommunityModal;
-
-				const attemptClick = (modal: HTMLElement, name: string, id?: string | null) => {
-					// First try to find by plugin ID (data attribute only, NOT href links)
-					if (id) {
-						const idElement = modal.querySelector(`[data-plugin-id="${id}"]`) as HTMLElement;
-						if (idElement) {
-							idElement.click();
-							return true;
-						}
-					}
-
-					// Try to find plugin by name using current Obsidian classes
-					const nameElements = Array.from(modal.querySelectorAll('.community-item-name, .community-plugin-name'));
-					console.log('[Settings Nav] attemptClick - nameElements count:', nameElements.length, 'looking for:', JSON.stringify(name));
-					if (nameElements.length === 0) {
-						// Dump all text-leaf elements that contain the name
-						const allEls = Array.from(modal.querySelectorAll('*'));
-						const matches = allEls.filter(el => el.textContent?.trim().toLowerCase().includes(name) && el.children.length === 0);
-						console.log('[Settings Nav] attemptClick - text matches:', matches.map(el => ({tag: el.tagName, class: el.className, text: el.textContent?.trim().substring(0, 50)})));
-					} else {
-						console.log('[Settings Nav] attemptClick - nameElement texts:', nameElements.map(el => el.textContent?.trim().toLowerCase()));
-					}
-					const nameEl = nameElements.find(el => el.textContent?.trim().toLowerCase() === name) as HTMLElement;
-					if (nameEl) {
-						const container = nameEl.closest('.community-item, .community-plugin-item') as HTMLElement;
-						// Debug: log what we found and what we're clicking
-						const clickTarget = container || nameEl;
-						console.log('[Settings Nav] attemptClick - found nameEl:', nameEl.textContent);
-						console.log('[Settings Nav] attemptClick - container:', container?.className);
-						console.log('[Settings Nav] attemptClick - container children:', Array.from(clickTarget.children).map(c => c.className));
-						console.log('[Settings Nav] attemptClick - container HTML (first 500):', clickTarget.outerHTML.substring(0, 500));
-						if (container) {
-							container.click();
-							return true;
-						}
-						nameEl.click();
-						return true;
-					}
-
-					return false;
-				};
-
-				if (browseModal) {
-					// We are in the browse window
-					if (!isQuery) {
-						console.log('[Settings Nav] In browse window, attempting click for target:', target, 'pluginId:', pluginId);
-						if (!attemptClick(topmostModal, target, pluginId)) {
-							console.log('[Settings Nav] attemptClick failed, searching...');
-							// Search for it if not immediately visible
-							const searchInput = topmostModal.querySelector('.community-modal-search-container input, .mod-community-modal input[type="search"], .mod-community-modal input[type="text"], .mod-community-plugin input[type="search"], .mod-community-plugin input[type="text"]') as HTMLInputElement;
-							console.log('[Settings Nav] searchInput found:', !!searchInput, searchInput?.tagName, searchInput?.type, searchInput?.className);
-							if (!searchInput) {
-								// Try broader search for any input in the modal
-								const allInputs = topmostModal.querySelectorAll('input');
-								console.log('[Settings Nav] All inputs in modal:', Array.from(allInputs).map(i => ({tag: i.tagName, type: i.type, class: i.className, placeholder: i.placeholder})));
-							}
-							if (searchInput) {
-								// Use pluginId for search if available, strip common prefixes
-								let searchTerm = target;
-								if (pluginId) {
-									searchTerm = pluginId.replace(/^obsidian-/, '').replace(/-plugin$/, '').replace(/-/g, ' ');
-								} else {
-									searchTerm = target.replace(/^obsidian\s+/, '').replace(/\s+plugin$/, '');
-								}
-								searchInput.value = searchTerm;
-								searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-								setTimeout(() => {
-									const updatedModal = getTopmostModal();
-									attemptClick(updatedModal, target, pluginId);
-								}, 1500);
-							}
-						}
-					} else {
-						// It's a search query, just update the search
-						const searchInput = topmostModal.querySelector('.community-modal-search-container input, .mod-community-modal input[type="search"], .mod-community-modal input[type="text"], .mod-community-plugin input[type="search"], .mod-community-plugin input[type="text"]') as HTMLInputElement;
-						if (searchInput) {
-							searchInput.value = target;
-							searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-						}
-					}
-				} else {
-					// We are in settings, need to click "Browse"
-					const browseBtn = Array.from(topmostModal?.querySelectorAll('.mod-cta') || [])
-						.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
-					if (browseBtn) {
-						browseBtn.click();
-						setTimeout(() => this.performNavigation(tabId), 500);
+					const searchInput = topmostModal.querySelector('.community-modal-search-container input, .mod-community-modal input[type="search"], .mod-community-modal input[type="text"], .mod-community-plugin input[type="search"], .mod-community-plugin input[type="text"]') as HTMLInputElement;
+					if (searchInput) {
+						searchInput.value = target;
+						searchInput.dispatchEvent(new Event('input', { bubbles: true }));
 					}
 				}
 			} else if (tabId === 'browse') {
