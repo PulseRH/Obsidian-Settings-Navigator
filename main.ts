@@ -22,6 +22,7 @@ interface PluginData {
 	currentIndex?: number;
 	enableXButtons?: boolean;
 	enableBrowseButtons?: boolean;
+	browseDefaultInstalled?: boolean;
 	transparentNavBar?: boolean;
 	cacheScrollPositions?: boolean;
 	cacheSearchBar?: boolean;
@@ -31,6 +32,7 @@ interface PluginData {
 interface PluginSettings {
 	enableXButtons: boolean;
 	enableBrowseButtons: boolean;
+	browseDefaultInstalled: boolean;
 	transparentNavBar: boolean;
 	cacheScrollPositions: boolean;
 	cacheSearchBar: boolean;
@@ -46,7 +48,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private pollInterval: number | null = null;
 	private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 	private mouseHandler: ((e: MouseEvent) => void) | null = null;
-	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true };
+	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true };
 	private injectedXButtons: WeakSet<HTMLElement> = new WeakSet();
 	private scrollCache: Map<string, number> = new Map();
 	private foldStateCache: Map<string, string[]> = new Map();
@@ -135,6 +137,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			if (data) {
 				this.settings.enableXButtons = data.enableXButtons ?? true;
 				this.settings.enableBrowseButtons = data.enableBrowseButtons ?? true;
+				this.settings.browseDefaultInstalled = data.browseDefaultInstalled ?? false;
 				this.settings.transparentNavBar = data.transparentNavBar ?? false;
 				this.settings.cacheScrollPositions = data.cacheScrollPositions ?? true;
 				this.settings.cacheSearchBar = data.cacheSearchBar ?? true;
@@ -170,6 +173,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				lastTabId: this.history.length > 0 ? this.history[this.currentIndex]?.tabId : undefined,
 				enableXButtons: this.settings.enableXButtons,
 				enableBrowseButtons: this.settings.enableBrowseButtons,
+				browseDefaultInstalled: this.settings.browseDefaultInstalled,
 				transparentNavBar: this.settings.transparentNavBar,
 				cacheScrollPositions: this.settings.cacheScrollPositions,
 				cacheSearchBar: this.settings.cacheSearchBar,
@@ -1318,6 +1322,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 		// Custom tooltip
 		let tooltip: HTMLElement | null = null;
+		let isHovering = false;
+		let currentShift = false;
 
 		const positionTooltip = () => {
 			if (!tooltip) return;
@@ -1327,30 +1333,90 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			tooltip.style.top = `${rect.top - tipRect.height - 4}px`;
 		};
 
-		browseBtn.addEventListener('mouseenter', () => {
+		const getTooltipText = (shiftHeld: boolean) => {
+			const swapped = this.settings.browseDefaultInstalled;
+			const showInstalled = swapped ? !shiftHeld : shiftHeld;
+			return showInstalled ? 'View in installed plugins' : 'View in Community Plugins';
+		};
+
+		const showTooltip = (text: string) => {
+			if (tooltip) {
+				if (tooltip.textContent !== text) {
+					tooltip.textContent = text;
+					positionTooltip();
+				}
+				return;
+			}
 			tooltip = document.createElement('div');
 			tooltip.className = 'tooltip mod-top';
-			tooltip.textContent = 'View in Community Plugins';
+			tooltip.textContent = text;
 			tooltip.style.cssText = 'position: fixed; z-index: 2147483647; pointer-events: none;';
 			document.body.appendChild(tooltip);
 			positionTooltip();
+		};
+
+		const hideTooltip = () => {
+			if (tooltip) { tooltip.remove(); tooltip = null; }
+		};
+
+		browseBtn.addEventListener('mouseenter', () => {
+			isHovering = true;
+			showTooltip(getTooltipText(currentShift));
 		});
 
 		browseBtn.addEventListener('mouseleave', () => {
-			if (tooltip) { tooltip.remove(); tooltip = null; }
+			isHovering = false;
+			hideTooltip();
+		});
+
+		const updateShiftState = (e: KeyboardEvent) => {
+			currentShift = e.shiftKey;
+			if (isHovering) {
+				showTooltip(getTooltipText(currentShift));
+			}
+		};
+
+		navItem.addEventListener('mouseenter', () => {
+			document.addEventListener('keydown', updateShiftState);
+			document.addEventListener('keyup', updateShiftState);
+		});
+
+		navItem.addEventListener('mouseleave', () => {
+			document.removeEventListener('keydown', updateShiftState);
+			document.removeEventListener('keyup', updateShiftState);
+			currentShift = false;
+			hideTooltip();
 		});
 
 		browseBtn.addEventListener('click', (e: MouseEvent) => {
 			e.stopPropagation();
 			e.preventDefault();
-			if (tooltip) { tooltip.remove(); tooltip = null; }
+			hideTooltip();
 
 			const pluginInfo = this.getPluginInfoForTab(tabId);
 			if (!pluginInfo) return;
 
-			const navTarget = `plugin:${pluginInfo.name}:${pluginInfo.id}`;
-			this.recordTabChange(navTarget);
-			this.performNavigation(navTarget);
+			const swapped = this.settings.browseDefaultInstalled;
+			const goToInstalled = swapped ? !e.shiftKey : e.shiftKey;
+
+			if (goToInstalled) {
+				// Navigate to community-plugins tab and search for the plugin
+				// Set the search override BEFORE navigating so the poll loop
+				// doesn't fight us with the old saved query
+				const manifests = (this.app as any).plugins?.manifests;
+				const manifest = manifests?.[pluginInfo.id];
+				const displayName = manifest?.name || pluginInfo.name;
+				this.savedSearchQuery = displayName;
+				this.searchBarRestoring = true;
+				this.searchBarRestored = true;
+				this.recordTabChange('community-plugins');
+				this.performNavigation('community-plugins');
+			} else {
+				// Open in Community Plugins browser
+				const navTarget = `plugin:${pluginInfo.name}:${pluginInfo.id}`;
+				this.recordTabChange(navTarget);
+				this.performNavigation(navTarget);
+			}
 		});
 
 		navItem.appendChild(browseBtn);
@@ -1450,6 +1516,16 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 					if (!value) {
 						this.plugin.removeAllXButtons();
 					}
+				}));
+
+		new Setting(containerEl)
+			.setName('Browse button defaults to installed plugins')
+			.setDesc('Swap the browse button behavior: normal click opens installed plugin settings, Shift+click opens in Community Plugins browser.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.browseDefaultInstalled)
+				.onChange(async (value) => {
+					this.plugin.settings.browseDefaultInstalled = value;
+					await this.plugin.savePluginData();
 				}));
 
 		new Setting(containerEl)
