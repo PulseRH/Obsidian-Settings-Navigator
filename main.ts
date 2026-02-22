@@ -66,28 +66,6 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		await this.loadSavedData();
 		this.addSettingTab(new SettingsNavigatorSettingTab(this.app, this));
 
-		this.addCommand({
-			id: 'settings-nav-back',
-			name: 'Navigate back in settings',
-			checkCallback: (checking: boolean) => {
-				const settingsOpen = document.querySelector('.modal-container .modal.mod-settings, .modal-container .modal.mod-community-modal');
-				if (!settingsOpen) return false;
-				if (!checking) this.navigateBack();
-				return true;
-			},
-		});
-
-		this.addCommand({
-			id: 'settings-nav-forward',
-			name: 'Navigate forward in settings',
-			checkCallback: (checking: boolean) => {
-				const settingsOpen = document.querySelector('.modal-container .modal.mod-settings, .modal-container .modal.mod-community-modal');
-				if (!settingsOpen) return false;
-				if (!checking) this.navigateForward();
-				return true;
-			},
-		});
-
 		// Direct keydown listener for Ctrl+Z/Ctrl+X inside settings modal
 		this.keydownHandler = (e: KeyboardEvent) => {
 			if (!e.ctrlKey || e.shiftKey || e.altKey) return;

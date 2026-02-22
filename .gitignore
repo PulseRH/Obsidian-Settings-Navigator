@@ -5,6 +5,6 @@ main.js
 main.js.map
 versions.json
 .claude/
+.cursor/
 .obsidian/
-
-
+data.json
