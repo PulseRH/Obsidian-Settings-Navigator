@@ -21,11 +21,12 @@
     justify-content: center;
     border-radius: 6px;
     color: var(--text-muted);
+    background: var(--background-secondary-alt);
 }
 
 .settings-nav-float-button:hover {
     color: var(--text-normal);
-    background: var(--background-modifier-hover);
+    background: var(--background-secondary);
 }
 
 .settings-nav-float-button.is-disabled {
@@ -108,17 +109,17 @@
 
 /* Transparent nav bar mode */
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button {
-    background: color-mix(in srgb, var(--background-secondary) 20%, transparent);
+    background: var(--background-secondary-alt);
     border: 1px solid var(--background-modifier-border);
     border-radius: 6px;
 }
 
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button:hover {
-    background: var(--background-modifier-hover);
+    background: var(--background-secondary);
 }
 
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button.is-disabled {
-    background: color-mix(in srgb, var(--background-secondary) 20%, transparent);
+    background: var(--background-secondary-alt);
     opacity: 0.3;
 }
 
