@@ -55,6 +55,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	savedSearchQuery: string = '';
 	private searchBarRestored: boolean = false;
 	private searchBarRestoring: boolean = false;
+	private modalWasClosed: boolean = false;
 
 	private isCommunityPluginsTab(tabId: string | null): boolean {
 		if (!tabId) return false;
@@ -384,6 +385,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			} else {
 				this.floatingPane.style.display = 'none';
 				this.searchBarRestored = false;
+				this.modalWasClosed = true;
 			}
 
 			// Track tab changes only from the TOPMOST modal
@@ -395,6 +397,15 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				}
 
 				const tabId = this.detectTabIdFromDOM();
+
+				// If modal just reopened, restore fold state then scroll for the current tab
+				if (this.modalWasClosed && tabId) {
+					this.modalWasClosed = false;
+					this.restoreFoldState(tabId, () => {
+						this.restoreScrollPosition(tabId);
+					});
+				}
+
 				// Only record valid, non-empty tab IDs that are different from current
 				if (tabId && tabId.trim().length > 0 && tabId !== this.lastActiveTabId && !this.isNavigatingProgrammatically) {
 					this.recordTabChange(tabId);
@@ -402,7 +413,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			}
 
 			// Continuously save scroll position and fold state for current tab
-			if (this.lastActiveTabId && this.settings.cacheScrollPositions) {
+			// Only save when the modal is actually open (not during close animation)
+			if (activeModalContainer && this.lastActiveTabId && this.settings.cacheScrollPositions) {
 				// Don't overwrite while a restore is in progress for this tab
 				const restoreKey = `__restoring_${this.lastActiveTabId}`;
 				if (!(this as any)[restoreKey]) {
@@ -586,9 +598,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.savePluginData();
 		this.updateButtonStates();
 
-		// Restore scroll position and fold state for the tab we just navigated to
-		this.restoreScrollPosition(normalizedId);
-		this.restoreFoldState(normalizedId);
+		// Restore fold state first, then scroll position after folds have expanded
+		this.restoreFoldState(normalizedId, () => {
+			this.restoreScrollPosition(normalizedId);
+		});
 	}
 
 	private navigateBack() {
@@ -757,9 +770,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.lastActiveTabId = tabId;
 		this.updateButtonStates();
 
-		// Restore scroll position, fold state, and search bar for the tab we navigated to
-		this.restoreScrollPosition(tabId);
-		this.restoreFoldState(tabId);
+		// Restore fold state first, then scroll position after folds have expanded
+		this.restoreFoldState(tabId, () => {
+			this.restoreScrollPosition(tabId);
+		});
 		if (this.isCommunityPluginsTab(tabId)) {
 			this.restoreSearchBarContent();
 		}
@@ -881,10 +895,16 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.foldStateCache.set(tabId, states.filter(s => !s.collapsed).map(s => s.key));
 	}
 
-	private restoreFoldState(tabId: string) {
-		if (!this.settings.cacheScrollPositions || !tabId) return;
+	private restoreFoldState(tabId: string, onComplete?: () => void) {
+		if (!this.settings.cacheScrollPositions || !tabId) {
+			onComplete?.();
+			return;
+		}
 		const expandedKeys = this.foldStateCache.get(tabId);
-		if (!expandedKeys) return;
+		if (!expandedKeys) {
+			onComplete?.();
+			return;
+		}
 
 		const expandedSet = new Set(expandedKeys);
 
@@ -894,12 +914,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			const contentEl = this.getSettingsContentEl();
 			if (!contentEl) {
 				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
+				else onComplete?.();
 				return;
 			}
 
 			const headings = contentEl.querySelectorAll('.style-settings-heading');
 			if (headings.length === 0) {
 				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
+				else onComplete?.();
 				return;
 			}
 
@@ -938,7 +960,11 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				);
 				if (hasDeeper) {
 					restoreLevel(level + 1, 5);
+				} else {
+					onComplete?.();
 				}
+			} else {
+				onComplete?.();
 			}
 		};
 

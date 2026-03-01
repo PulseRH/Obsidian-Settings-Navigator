@@ -20,13 +20,13 @@
     align-items: center;
     justify-content: center;
     border-radius: 6px;
-    color: var(--text-muted);
-    background: var(--background-secondary-alt);
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
 }
 
 .settings-nav-float-button:hover {
     color: var(--text-normal);
-    background: var(--background-secondary);
+    background: var(--background-modifier-active-hover);
 }
 
 .settings-nav-float-button.is-disabled {
@@ -109,17 +109,17 @@
 
 /* Transparent nav bar mode */
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button {
-    background: var(--background-secondary-alt);
+    background: var(--background-modifier-hover);
     border: 1px solid var(--background-modifier-border);
     border-radius: 6px;
 }
 
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button:hover {
-    background: var(--background-secondary);
+    background: var(--background-modifier-active-hover);
 }
 
 .settings-nav-floating-pane.mod-transparent .settings-nav-float-button.is-disabled {
-    background: var(--background-secondary-alt);
+    background: var(--background-modifier-hover);
     opacity: 0.3;
 }
 
