@@ -9,6 +9,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 ### Navigation
 - **Back/Forward buttons** - floating navigation bar above the settings modal, works like a browser's history
 - **Keyboard shortcuts** - `Ctrl+Z` (back) and `Ctrl+X` (forward) while settings are open
+- **First-Letter Navigation** - use Keyboard to Type the first letter to navigate to Tab or Contents 
 - **Mouse 3/4 support** - use your mouse back/forward buttons to navigate
 - **History indicator** - shows your current position in the navigation history (e.g. `3/10`)
 - **Clickable section headers** - click "Core plugins" or "Community plugins" headings to jump to those tabs
@@ -21,7 +22,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 ### Persistence
 - **Scroll position caching** - remembers where you scrolled on each settings tab and restores it when you return
 - **Search bar persistence** - remembers the "Search installed plugins..." filter text across tab switches
-- **Remembers Style Settings Folding/Ufolding
+- **Remembers Style Settings** - Folding/Ufolding
 
 ### Appearance
 - **Transparent navigation bar mode** - optional setting that makes the nav bar background transparent with individually styled buttons
