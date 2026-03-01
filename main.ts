@@ -26,6 +26,8 @@ interface PluginData {
 	transparentNavBar?: boolean;
 	cacheScrollPositions?: boolean;
 	cacheSearchBar?: boolean;
+	enableFirstLetterNav?: boolean;
+	letterNavMode?: 'tab' | 'shift';
 	savedSearchQuery?: string;
 }
 
@@ -36,6 +38,8 @@ interface PluginSettings {
 	transparentNavBar: boolean;
 	cacheScrollPositions: boolean;
 	cacheSearchBar: boolean;
+	enableFirstLetterNav: boolean;
+	letterNavMode: 'tab' | 'shift';
 }
 
 export default class SettingsBackAndForthPlugin extends Plugin {
@@ -48,7 +52,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private pollInterval: number | null = null;
 	private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 	private mouseHandler: ((e: MouseEvent) => void) | null = null;
-	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true };
+	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true, enableFirstLetterNav: true, letterNavMode: 'tab' };
 	private injectedXButtons: WeakSet<HTMLElement> = new WeakSet();
 	private scrollCache: Map<string, number> = new Map();
 	private foldStateCache: Map<string, string[]> = new Map();
@@ -56,6 +60,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private searchBarRestored: boolean = false;
 	private searchBarRestoring: boolean = false;
 	private modalWasClosed: boolean = false;
+	private lastLetterPressed: string = '';
+	private lastLetterIndex: number = -1;
+	private lastLetterTime: number = 0;
+	private letterNavFocusSidebar: boolean = true;
 
 	private isCommunityPluginsTab(tabId: string | null): boolean {
 		if (!tabId) return false;
@@ -67,19 +75,48 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		await this.loadSavedData();
 		this.addSettingTab(new SettingsNavigatorSettingTab(this.app, this));
 
-		// Direct keydown listener for Ctrl+Z/Ctrl+X inside settings modal
+		// Direct keydown listener for Ctrl+Z/Ctrl+X and first-letter navigation
 		this.keydownHandler = (e: KeyboardEvent) => {
-			if (!e.ctrlKey || e.shiftKey || e.altKey) return;
-			if (e.key !== 'z' && e.key !== 'x') return;
 			const settingsOpen = document.querySelector('.modal-container .modal');
 			if (!settingsOpen) return;
-			e.preventDefault();
-			e.stopPropagation();
-			if (e.key === 'z') {
-				this.navigateBack();
-			} else if (e.key === 'x') {
-				this.navigateForward();
+
+			// Ctrl+Z / Ctrl+X for back/forward
+			if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'x')) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (e.key === 'z') this.navigateBack();
+				else this.navigateForward();
+				return;
 			}
+
+			// First-letter navigation
+			if (!this.settings.enableFirstLetterNav) return;
+
+			// Ctrl+Tab toggles between sidebar and content focus
+			if (this.settings.letterNavMode === 'tab' && e.ctrlKey && e.key === 'Tab') {
+				e.preventDefault();
+				e.stopPropagation();
+				this.letterNavFocusSidebar = !this.letterNavFocusSidebar;
+				return;
+			}
+
+			if (e.ctrlKey || e.altKey || e.metaKey) return;
+			if (!/^[a-z]$/i.test(e.key)) return;
+			// Don't capture when typing in inputs
+			const active = document.activeElement;
+			if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)) return;
+
+			// Determine if we should target sidebar or content
+			let forceSidebar: boolean;
+			if (this.settings.letterNavMode === 'shift') {
+				forceSidebar = e.shiftKey;
+			} else {
+				// Tab mode
+				forceSidebar = this.letterNavFocusSidebar;
+			}
+
+			e.preventDefault();
+			this.handleFirstLetterNav(e.key.toLowerCase(), forceSidebar);
 		};
 		document.addEventListener('keydown', this.keydownHandler, true);
 
@@ -119,6 +156,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.settings.transparentNavBar = data.transparentNavBar ?? false;
 				this.settings.cacheScrollPositions = data.cacheScrollPositions ?? true;
 				this.settings.cacheSearchBar = data.cacheSearchBar ?? true;
+				this.settings.enableFirstLetterNav = data.enableFirstLetterNav ?? true;
+				this.settings.letterNavMode = data.letterNavMode ?? 'tab';
 				this.savedSearchQuery = data.savedSearchQuery ?? '';
 			}
 			if (data && data.history) {
@@ -155,6 +194,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				transparentNavBar: this.settings.transparentNavBar,
 				cacheScrollPositions: this.settings.cacheScrollPositions,
 				cacheSearchBar: this.settings.cacheSearchBar,
+				enableFirstLetterNav: this.settings.enableFirstLetterNav,
+				letterNavMode: this.settings.letterNavMode,
 				savedSearchQuery: this.savedSearchQuery,
 			};
 			await this.saveData(data);
@@ -650,6 +691,97 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		// Couldn't find a different entry — restore original position
 		this.currentIndex = startIndex;
 		this.updateButtonStates();
+	}
+
+	private handleFirstLetterNav(letter: string, forceSidebar: boolean = true) {
+		const doc = activeDocument || document;
+		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
+		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
+		if (!modalContainer) return;
+
+		const modal = modalContainer.querySelector('.modal') as HTMLElement;
+		if (!modal) return;
+
+		// Collect navigable items: sidebar items + content area plugin list items
+		interface NavItem { element: HTMLElement; text: string; isSidebar: boolean; }
+		const items: NavItem[] = [];
+
+		// Sidebar items
+		const sidebarItems = modal.querySelectorAll('.vertical-tab-nav-item');
+		sidebarItems.forEach((el) => {
+			const htmlEl = el as HTMLElement;
+			// Skip section headers
+			if (htmlEl.classList.contains('vertical-tab-nav-header') ||
+				htmlEl.classList.contains('mod-settings-section-header') ||
+				htmlEl.classList.contains('settings-tab-header')) return;
+			const text = (htmlEl.textContent || '').trim().toLowerCase();
+			if (text) items.push({ element: htmlEl, text, isSidebar: true });
+		});
+
+		// Content area items (installed plugins, core plugins, CSS snippets, themes, etc.)
+		const contentEl = modal.querySelector('.vertical-tab-content') as HTMLElement;
+		if (contentEl) {
+			// Standard setting items (core plugins toggles, most settings lists)
+			const settingItems = contentEl.querySelectorAll('.setting-item');
+			settingItems.forEach((el) => {
+				const htmlEl = el as HTMLElement;
+				const nameEl = htmlEl.querySelector('.setting-item-name');
+				const text = (nameEl?.textContent || '').trim().toLowerCase();
+				if (text) items.push({ element: htmlEl, text, isSidebar: false });
+			});
+
+			// Installed plugins list (community-plugins tab uses .installed-plugins-container)
+			const pluginItems = contentEl.querySelectorAll('.installed-plugins-container .setting-item, .community-plugin-item');
+			pluginItems.forEach((el) => {
+				const htmlEl = el as HTMLElement;
+				if (items.some(i => i.element === htmlEl)) return; // Skip duplicates
+				const nameEl = htmlEl.querySelector('.setting-item-name, .community-plugin-name, .community-item-name');
+				const text = (nameEl?.textContent || '').trim().toLowerCase();
+				if (text) items.push({ element: htmlEl, text, isSidebar: false });
+			});
+
+			// CSS snippets on appearance page
+			const snippetItems = contentEl.querySelectorAll('.installed-snippet-item, .setting-item-heading');
+			snippetItems.forEach((el) => {
+				const htmlEl = el as HTMLElement;
+				if (items.some(i => i.element === htmlEl)) return;
+				const text = (htmlEl.querySelector('.setting-item-name')?.textContent || htmlEl.textContent || '').trim().toLowerCase();
+				if (text) items.push({ element: htmlEl, text, isSidebar: false });
+			});
+		}
+
+		// Filter items starting with the pressed letter
+		const allMatches = items.filter(item => item.text.startsWith(letter));
+		if (allMatches.length === 0) return;
+
+		// Only match items in the targeted area — no fallback
+		const matches = allMatches.filter(item => item.isSidebar === forceSidebar);
+		if (matches.length === 0) return;
+
+		// Cycle logic
+		const now = Date.now();
+		if (letter === this.lastLetterPressed && (now - this.lastLetterTime) < 1500) {
+			this.lastLetterIndex = (this.lastLetterIndex + 1) % matches.length;
+		} else {
+			this.lastLetterIndex = 0;
+		}
+		this.lastLetterPressed = letter;
+		this.lastLetterTime = now;
+
+		const target = matches[this.lastLetterIndex];
+		if (target.isSidebar) {
+			target.element.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+			target.element.click();
+		} else {
+			target.element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			// Brief highlight
+			target.element.style.transition = 'background 0.3s';
+			target.element.style.background = 'var(--background-modifier-hover)';
+			setTimeout(() => {
+				target.element.style.background = '';
+				setTimeout(() => { target.element.style.transition = ''; }, 300);
+			}, 800);
+		}
 	}
 
 	private performNavigation(tabId: string) {
@@ -1470,6 +1602,28 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 						this.plugin.savedSearchQuery = '';
 						await this.plugin.savePluginData();
 					}
+				}));
+
+		new Setting(containerEl)
+			.setName('First-letter navigation')
+			.setDesc('Press a letter key to jump to matching items in the sidebar and plugin lists. Press again to cycle through matches.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableFirstLetterNav)
+				.onChange(async (value) => {
+					this.plugin.settings.enableFirstLetterNav = value;
+					await this.plugin.savePluginData();
+				}));
+
+		new Setting(containerEl)
+			.setName('First-letter navigation mode')
+			.setDesc('How to switch between sidebar and content navigation.')
+			.addDropdown(dropdown => dropdown
+				.addOption('tab', 'Ctrl+Tab toggles focus')
+				.addOption('shift', 'Shift+letter for sidebar')
+				.setValue(this.plugin.settings.letterNavMode)
+				.onChange(async (value) => {
+					this.plugin.settings.letterNavMode = value as 'tab' | 'shift';
+					await this.plugin.savePluginData();
 				}));
 	}
 }
