@@ -1,11 +1,11 @@
 {
-	"id": "settings-back-and-forth",
+	"id": "settings-navigator",
 	"name": "Settings Navigator",
-	"version": "1.0.0",
+	"version": "0.9.5",
 	"minAppVersion": "0.15.0",
-	"description": "Adds back and forth navigation arrows to the settings sidebar header",
-	"author": "Your Name",
-	"authorUrl": "",
+	"description": "Adds back and forth navigation arrows to the settings",
+	"author": "PulseRH",
+	"authorUrl": "https://github.com/PulseRH",
 	"fundingUrl": "",
 	"isDesktopOnly": false
 }
