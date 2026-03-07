@@ -4,15 +4,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 
 <img width="191" height="58" alt="image" src="https://github.com/user-attachments/assets/1e3752e3-2c2e-468a-82fc-c58927b0ecb5" /> 
 
-<script src='https://storage.ko-fi.com/cdn/scripts/overlay-widget.js'></script>
-<script>
-  kofiWidgetOverlay.draw('pulser', {
-    'type': 'floating-chat',
-    'floating-chat.donateButton.text': 'Support Me',
-    'floating-chat.donateButton.background-color': '#fcbf47',
-    'floating-chat.donateButton.text-color': '#323842'
-  });
-</script>
+<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#de7309', 'Q5Q21SW0YU');kofiwidget2.draw();</script> 
 
 ## Features
 
