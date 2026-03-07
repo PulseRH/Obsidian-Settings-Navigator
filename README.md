@@ -2,9 +2,8 @@
 
 An Obsidian plugin that adds browser-style navigation, quick plugin management, and quality-of-life improvements to the Settings modal.
 
-<img width="191" height="58" alt="image" src="https://github.com/user-attachments/assets/1e3752e3-2c2e-468a-82fc-c58927b0ecb5" /> 
+<img width="191" height="58" alt="image" src="https://github.com/user-attachments/assets/1e3752e3-2c2e-468a-82fc-c58927b0ecb5" /> <a href='https://ko-fi.com/Q5Q21SW0YU' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
-<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#de7309', 'Q5Q21SW0YU');kofiwidget2.draw();</script> 
 
 ## Features
 
