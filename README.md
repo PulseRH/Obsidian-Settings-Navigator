@@ -2,7 +2,9 @@
 
 An Obsidian plugin that adds browser-style navigation, quick plugin management, and quality-of-life improvements to the Settings modal.
 
-<img width="191" height="58" alt="image" src="https://github.com/user-attachments/assets/1e3752e3-2c2e-468a-82fc-c58927b0ecb5" /> <script src='https://storage.ko-fi.com/cdn/scripts/overlay-widget.js'></script>
+<img width="191" height="58" alt="image" src="https://github.com/user-attachments/assets/1e3752e3-2c2e-468a-82fc-c58927b0ecb5" /> 
+
+<script src='https://storage.ko-fi.com/cdn/scripts/overlay-widget.js'></script>
 <script>
   kofiWidgetOverlay.draw('pulser', {
     'type': 'floating-chat',
