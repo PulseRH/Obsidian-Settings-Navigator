@@ -64,6 +64,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private lastLetterIndex: number = -1;
 	private lastLetterTime: number = 0;
 	private letterNavFocusSidebar: boolean = true;
+	private lastNavActionTime: number = 0;
 
 	private isCommunityPluginsTab(tabId: string | null): boolean {
 		if (!tabId) return false;
@@ -72,6 +73,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 	async onload() {
 		console.log('[Settings Nav] Plugin loading...');
+		// Diagnostic: log available methods on the settings object for community plugin navigation
+		try {
+			const setting = (this.app as any).setting;
+			if (setting) {
+				const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(setting));
+				console.log('[Settings Nav] Setting methods:', methods);
+			}
+		} catch (e) { /* ignore */ }
 		await this.loadSavedData();
 		this.addSettingTab(new SettingsNavigatorSettingTab(this.app, this));
 
@@ -449,7 +458,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 				// Only record valid, non-empty tab IDs that are different from current
 				if (tabId && tabId.trim().length > 0 && tabId !== this.lastActiveTabId && !this.isNavigatingProgrammatically) {
-					this.recordTabChange(tabId);
+					// After back/forward navigation, give a grace period before recording
+					// from the poll loop to avoid chopping forward history
+					if (Date.now() - this.lastNavActionTime < 2500) {
+						this.lastActiveTabId = tabId;
+					} else {
+						this.recordTabChange(tabId);
+					}
 				}
 			}
 
@@ -508,17 +523,21 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			|| modalContainer.querySelector('.community-plugin-details')
 			|| modalContainer.querySelector('.modal-content .community-plugin-info');
 
-		if (browseSearch || detailsView) {
-			// ONLY return a plugin name if we have a DETAILS VIEW with actual content
-			// Check if details view has meaningful content (not just empty)
+		if (communityModal || browseSearch || detailsView) {
+			// We're in the community plugins modal — never fall through to regular tab detection
 			if (detailsView) {
 				const detailsText = (detailsView as HTMLElement).innerText.trim();
-				const hasContent = detailsText.length > 50; // Must have substantial content
+				const hasContent = detailsText.length > 50;
 
 				if (hasContent) {
-					// Try to find plugin ID from shareable link or data attributes
-					const shareLink = modalContainer.querySelector('a[href*="obsidian://"], button[data-plugin-id], [data-plugin-id]') as HTMLElement;
-					const pluginId = shareLink?.getAttribute('data-plugin-id') || shareLink?.getAttribute('href')?.match(/plugin[\/=]([^&]+)/)?.[1];
+					// Try to find plugin ID from share link, data attributes, or install button
+					const shareLink = modalContainer.querySelector('a[href*="obsidian://show-plugin"]') as HTMLAnchorElement;
+					let pluginId = shareLink?.href?.match(/[?&]id=([^&]+)/)?.[1] || '';
+
+					if (!pluginId) {
+						const dataEl = modalContainer.querySelector('[data-plugin-id]') as HTMLElement;
+						pluginId = dataEl?.getAttribute('data-plugin-id') || '';
+					}
 
 					let name = "";
 					const nameEl = modalContainer.querySelector('.community-modal-details-name')
@@ -528,7 +547,6 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 					if (nameEl && nameEl.textContent && !nameEl.textContent.toLowerCase().includes('community plugins')) {
 						name = nameEl.textContent.trim().toLowerCase();
-						// Store plugin ID if found for better navigation
 						if (pluginId) {
 							return `plugin:${name}:${pluginId}`;
 						}
@@ -537,7 +555,12 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				}
 			}
 
-			// If it's a modal with search but no specific name/details yet, it's 'browse'
+			// In the browse list view, or details still loading — return 'browse'
+			// but don't change from a plugin entry to 'browse' during transition
+			if (this.lastActiveTabId?.startsWith('plugin:')) {
+				// Details might be loading — keep current state to avoid phantom entries
+				return this.lastActiveTabId;
+			}
 			return 'browse';
 		}
 
@@ -659,6 +682,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
 			// Found a different, valid entry
+			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
 			this.performNavigation(entry.tabId);
 			return;
@@ -683,6 +707,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
 			// Found a different, valid entry
+			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
 			this.performNavigation(entry.tabId);
 			return;
@@ -811,9 +836,139 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				const target = parts[0]; // Plugin name
 				const pluginId = parts.length > 1 ? parts[1] : null; // Plugin ID if available
 
-				if (!isQuery && pluginId) {
-					// Use Obsidian's native URI to open the plugin info modal
-					window.open(`obsidian://show-plugin?id=${pluginId}`);
+				if (!isQuery) {
+					// Navigate to a specific community plugin's details
+					let id = pluginId;
+					if (!id) {
+						// Look up ID from manifests by display name
+						const manifests = (this.app as any).plugins?.manifests;
+						if (manifests) {
+							for (const [mId, manifest] of Object.entries(manifests)) {
+								if ((manifest as any).name?.toLowerCase() === target) {
+									id = mId;
+									break;
+								}
+							}
+						}
+					}
+
+					const topmostModal = getTopmostModal();
+					const communityModal = topmostModal?.querySelector('.mod-community-modal, .mod-community-plugin');
+
+					if (communityModal) {
+						// Community modal is already open — navigate within it
+						// Step 1: If in details view, click back to browse list
+						const backBtn = topmostModal.querySelector('.modal-title-back') as HTMLElement;
+						if (backBtn) backBtn.click();
+
+						// Step 2: Search for the plugin, then click the matching result
+						const searchAndClick = () => {
+							const modal = getTopmostModal();
+							if (!modal) return;
+
+							const searchInput = modal.querySelector(
+								'.community-modal-search-container input, ' +
+								'.mod-community-modal input[type="search"], ' +
+								'.mod-community-modal input[type="text"], ' +
+								'.mod-community-plugin input[type="search"], ' +
+								'.mod-community-plugin input[type="text"]'
+							) as HTMLInputElement;
+
+							if (searchInput) {
+								// Search by plugin name
+								searchInput.value = target;
+								searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+								// Step 3: Wait for results, then find and click the match
+								setTimeout(() => {
+									const resultModal = getTopmostModal();
+									if (!resultModal) return;
+
+									// Log DOM structure for debugging
+									const allEls = Array.from(resultModal.querySelectorAll('*'));
+									const classNames = allEls
+										.map(el => Array.from(el.classList).join('.'))
+										.filter(s => s && (s.includes('community') || s.includes('plugin')));
+									const uniqueClasses = [...new Set(classNames)];
+									console.log('[Settings Nav] Community modal classes:', uniqueClasses);
+
+									// Try multiple selectors for browse list items
+									const itemSelectors = [
+										'.community-plugin-item',
+										'.community-modal-item',
+										'.community-plugin-card',
+										'.community-item',
+									];
+
+									let items: Element[] = [];
+									for (const sel of itemSelectors) {
+										items = Array.from(resultModal.querySelectorAll(sel));
+										if (items.length > 0) {
+											console.log('[Settings Nav] Found items with selector:', sel, 'count:', items.length);
+											break;
+										}
+									}
+
+									// Fallback: find clickable divs in modal content
+									if (items.length === 0) {
+										const contentArea = resultModal.querySelector('.modal-content, .community-modal-content, .mod-community-modal') as HTMLElement;
+										if (contentArea) {
+											// Look for substantial child elements that look like list items
+											items = Array.from(contentArea.querySelectorAll(':scope > div > div, :scope > div > a')).filter(el => {
+												const text = el.textContent?.trim() || '';
+												return text.length > 5 && text.length < 500;
+											});
+											console.log('[Settings Nav] Fallback items found:', items.length);
+										}
+									}
+
+									// Find matching item by name
+									let clickTarget: Element | null = null;
+									for (const item of items) {
+										// Check name sub-elements
+										const nameEl = item.querySelector(
+											'.community-plugin-name, .community-item-name, ' +
+											'.setting-item-name, .community-modal-info-name, h3, h4'
+										);
+										const name = (nameEl?.textContent || '').trim().toLowerCase();
+										if (name === target) {
+											clickTarget = item;
+											break;
+										}
+										// Check if the item text starts with the target name
+										const itemText = (item.textContent || '').trim().toLowerCase();
+										if (itemText.startsWith(target)) {
+											clickTarget = item;
+											break;
+										}
+									}
+
+									// Fallback: first result
+									if (!clickTarget && items.length > 0) {
+										clickTarget = items[0];
+										console.log('[Settings Nav] Using first result as fallback');
+									}
+
+									if (clickTarget) {
+										console.log('[Settings Nav] Clicking plugin result:', (clickTarget as HTMLElement).textContent?.substring(0, 50));
+										(clickTarget as HTMLElement).click();
+									} else {
+										console.warn('[Settings Nav] Could not find plugin in browse list, falling back to URI');
+										if (id) window.open(`obsidian://show-plugin?id=${id}`);
+									}
+								}, 600);
+							} else {
+								console.warn('[Settings Nav] Could not find search input, falling back to URI');
+								if (id) window.open(`obsidian://show-plugin?id=${id}`);
+							}
+						};
+
+						// Wait for back animation if we clicked back, otherwise search immediately
+						setTimeout(searchAndClick, backBtn ? 400 : 50);
+					} else if (id) {
+						// Community modal not open — use URI to open it directly
+						window.open(`obsidian://show-plugin?id=${id}`);
+					}
 				} else if (isQuery) {
 					// For search queries, we need to interact with the browse modal search
 					let topmostModal = getTopmostModal();

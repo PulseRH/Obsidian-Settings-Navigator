@@ -1,6 +1,6 @@
 {
 	"id": "settings-back-and-forth",
-	"name": "Settings Back and Forth",
+	"name": "Settings Navigator",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Adds back and forth navigation arrows to the settings sidebar header",
