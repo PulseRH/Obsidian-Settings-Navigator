@@ -12,7 +12,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 - **Keyboard shortcuts** - `Ctrl+Z` (back) and `Ctrl+X` (forward) while settings are open
 - **First-Letter Navigation** - use Keyboard to Type the first letter to navigate to Tab or Contents 
 - **Mouse 3/4 support** - use your mouse back/forward buttons to navigate
-- **History indicator** - shows your current position in the navigation history (e.g. `3/10`)
+- **History indicator** - shows your current position in the navigation history (e.g. `23/50`)
 - **Clickable section headers** - click "Core plugins" or "Community plugins" headings to jump to those tabs
 
 ### Plugin Management
