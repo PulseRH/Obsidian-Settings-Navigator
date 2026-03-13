@@ -23,7 +23,7 @@ An Obsidian plugin that adds browser-style navigation, quick plugin management, 
 ### Persistence
 - **Scroll position caching** - remembers where you scrolled on each settings tab and restores it when you return
 - **Search bar persistence** - remembers the "Search installed plugins..." filter text across tab switches
-- **Remembers Style Settings** - Folding/Ufolding
+- **Remembers Style Settings** - Folding/Unfolding
 
 ### Appearance
 - **Transparent navigation bar mode** - optional setting that makes the nav bar background transparent with individually styled buttons
@@ -42,9 +42,6 @@ All features can be toggled individually in the plugin's settings tab:
 
 ## Installation
 
-1. paste url into BRAt Plugin or add archive to plugins folder manually
+1. paste url into BRAT Plugin or add archive to plugins folder manually
 
-## Development
 
-- `npm run dev` - Build in development mode with watch
-- `npm run build` - Build for production
