@@ -703,13 +703,15 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
 		const startIndex = this.currentIndex;
 
-		// Skip back past invalid entries and entries matching current tab
+		// Skip back past invalid entries, entries matching current tab, and transitional 'browse' entries
 		while (this.currentIndex > 0) {
 			this.currentIndex--;
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
+			// Skip 'browse' entries — they're transitional (community modal just opened, no plugin selected)
+			if (entry.tabId === 'browse') continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
@@ -728,13 +730,15 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
 		const startIndex = this.currentIndex;
 
-		// Skip forward past invalid entries and entries matching current tab
+		// Skip forward past invalid entries, entries matching current tab, and transitional 'browse' entries
 		while (this.currentIndex < this.history.length - 1) {
 			this.currentIndex++;
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
+			// Skip 'browse' entries — they're transitional (community modal just opened, no plugin selected)
+			if (entry.tabId === 'browse') continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
