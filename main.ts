@@ -81,14 +81,6 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 	async onload() {
 		console.log('[Settings Nav] Plugin loading...');
-		// Diagnostic: log available methods on the settings object for community plugin navigation
-		try {
-			const setting = (this.app as any).setting;
-			if (setting) {
-				const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(setting));
-				console.log('[Settings Nav] Setting methods:', methods);
-			}
-		} catch (e) { /* ignore */ }
 		await this.loadSavedData();
 		this.addSettingTab(new SettingsNavigatorSettingTab(this.app, this));
 
@@ -874,137 +866,51 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				const pluginId = parts.length > 1 ? parts[1] : null; // Plugin ID if available
 
 				if (!isQuery) {
-					// Navigate to a specific community plugin's details
-					let id = pluginId;
-					if (!id) {
-						// Look up ID from manifests by display name
-						const manifests = (this.app as any).plugins?.manifests;
-						if (manifests) {
-							for (const [mId, manifest] of Object.entries(manifests)) {
-								if ((manifest as any).name?.toLowerCase() === target) {
-									id = mId;
-									break;
-								}
-							}
-						}
-					}
-
+					// Navigate to a specific community plugin's details by clicking its sidebar item
 					const topmostModal = getTopmostModal();
 					const communityModal = topmostModal?.querySelector('.mod-community-modal, .mod-community-plugin');
 
 					if (communityModal) {
-						// Community modal is already open — navigate within it
-						// Step 1: If in details view, click back to browse list
-						const backBtn = topmostModal.querySelector('.modal-title-back') as HTMLElement;
-						if (backBtn) backBtn.click();
-
-						// Step 2: Search for the plugin, then click the matching result
-						const searchAndClick = () => {
-							const modal = getTopmostModal();
-							if (!modal) return;
-
-							const searchInput = modal.querySelector(
-								'.community-modal-search-container input, ' +
-								'.mod-community-modal input[type="search"], ' +
-								'.mod-community-modal input[type="text"], ' +
-								'.mod-community-plugin input[type="search"], ' +
-								'.mod-community-plugin input[type="text"]'
-							) as HTMLInputElement;
-
-							if (searchInput) {
-								// Search by plugin name
-								searchInput.value = target;
-								searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-
-								// Step 3: Wait for results, then find and click the match
-								setTimeout(() => {
-									const resultModal = getTopmostModal();
-									if (!resultModal) return;
-
-									// Log DOM structure for debugging
-									const allEls = Array.from(resultModal.querySelectorAll('*'));
-									const classNames = allEls
-										.map(el => Array.from(el.classList).join('.'))
-										.filter(s => s && (s.includes('community') || s.includes('plugin')));
-									const uniqueClasses = [...new Set(classNames)];
-									console.log('[Settings Nav] Community modal classes:', uniqueClasses);
-
-									// Try multiple selectors for browse list items
-									const itemSelectors = [
-										'.community-plugin-item',
-										'.community-modal-item',
-										'.community-plugin-card',
-										'.community-item',
-									];
-
-									let items: Element[] = [];
-									for (const sel of itemSelectors) {
-										items = Array.from(resultModal.querySelectorAll(sel));
-										if (items.length > 0) {
-											console.log('[Settings Nav] Found items with selector:', sel, 'count:', items.length);
-											break;
-										}
-									}
-
-									// Fallback: find clickable divs in modal content
-									if (items.length === 0) {
-										const contentArea = resultModal.querySelector('.modal-content, .community-modal-content, .mod-community-modal') as HTMLElement;
-										if (contentArea) {
-											// Look for substantial child elements that look like list items
-											items = Array.from(contentArea.querySelectorAll(':scope > div > div, :scope > div > a')).filter(el => {
-												const text = el.textContent?.trim() || '';
-												return text.length > 5 && text.length < 500;
-											});
-											console.log('[Settings Nav] Fallback items found:', items.length);
-										}
-									}
-
-									// Find matching item by name
-									let clickTarget: Element | null = null;
-									for (const item of items) {
-										// Check name sub-elements
-										const nameEl = item.querySelector(
-											'.community-plugin-name, .community-item-name, ' +
-											'.setting-item-name, .community-modal-info-name, h3, h4'
-										);
-										const name = (nameEl?.textContent || '').trim().toLowerCase();
-										if (name === target) {
-											clickTarget = item;
-											break;
-										}
-										// Check if the item text starts with the target name
-										const itemText = (item.textContent || '').trim().toLowerCase();
-										if (itemText.startsWith(target)) {
-											clickTarget = item;
-											break;
-										}
-									}
-
-									// Fallback: first result
-									if (!clickTarget && items.length > 0) {
-										clickTarget = items[0];
-										console.log('[Settings Nav] Using first result as fallback');
-									}
-
-									if (clickTarget) {
-										console.log('[Settings Nav] Clicking plugin result:', (clickTarget as HTMLElement).textContent?.substring(0, 50));
-										(clickTarget as HTMLElement).click();
-									} else {
-										console.warn('[Settings Nav] Could not find plugin in browse list, falling back to URI');
-										if (id) window.open(`obsidian://show-plugin?id=${id}`);
-									}
-								}, 600);
-							} else {
-								console.warn('[Settings Nav] Could not find search input, falling back to URI');
-								if (id) window.open(`obsidian://show-plugin?id=${id}`);
+						// Community modal is open — find and click the plugin by name in the sidebar
+						// Names may differ between detail view and sidebar (e.g. "Plugin for Obsidian" vs "Plugin")
+						const items = communityModal.querySelectorAll('.community-item');
+						let clicked = false;
+						// First try exact match, then substring match
+						for (let i = 0; i < items.length; i++) {
+							const itemName = items[i].querySelector('.community-item-name')?.textContent?.trim()?.toLowerCase();
+							if (itemName === target) {
+								(items[i] as HTMLElement).click();
+								clicked = true;
+								break;
 							}
-						};
-
-						// Wait for back animation if we clicked back, otherwise search immediately
-						setTimeout(searchAndClick, backBtn ? 400 : 50);
-					} else if (id) {
-						// Community modal not open — use URI to open it directly
-						window.open(`obsidian://show-plugin?id=${id}`);
+						}
+						if (!clicked) {
+							for (let i = 0; i < items.length; i++) {
+								const itemName = items[i].querySelector('.community-item-name')?.textContent?.trim()?.toLowerCase();
+								if (itemName && (target.includes(itemName) || itemName.includes(target))) {
+									(items[i] as HTMLElement).click();
+									clicked = true;
+									break;
+								}
+							}
+						}
+						if (!clicked && pluginId) {
+							// Fallback: use obsidian:// URI if item not found in list
+							window.open(`obsidian://show-plugin?id=${pluginId}`);
+						}
+					} else {
+						// Community modal not open — open browse first, then navigate
+						setting.openTabById('community-plugins');
+						setTimeout(() => {
+							const newTop = getTopmostModal();
+							const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
+								.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
+							if (browseBtn) {
+								browseBtn.click();
+								setTimeout(() => this.performNavigation(tabId), 500);
+							}
+						}, 300);
+						return;
 					}
 				} else if (isQuery) {
 					// For search queries, we need to interact with the browse modal search
