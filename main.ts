@@ -24,11 +24,13 @@ interface PluginData {
 	enableBrowseButtons?: boolean;
 	browseDefaultInstalled?: boolean;
 	transparentNavBar?: boolean;
+	showTabLabel?: string | number;
 	cacheScrollPositions?: boolean;
 	cacheSearchBar?: boolean;
 	enableFirstLetterNav?: boolean;
 	letterNavMode?: 'tab' | 'shift';
-	savedSearchQuery?: string;
+	savedSearchQuery?: string; // legacy
+	savedSearchQueries?: Record<string, string>;
 }
 
 interface PluginSettings {
@@ -36,6 +38,7 @@ interface PluginSettings {
 	enableBrowseButtons: boolean;
 	browseDefaultInstalled: boolean;
 	transparentNavBar: boolean;
+	showTabLabel: number;
 	cacheScrollPositions: boolean;
 	cacheSearchBar: boolean;
 	enableFirstLetterNav: boolean;
@@ -52,13 +55,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private pollInterval: number | null = null;
 	private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 	private mouseHandler: ((e: MouseEvent) => void) | null = null;
-	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, cacheScrollPositions: true, cacheSearchBar: true, enableFirstLetterNav: true, letterNavMode: 'tab' };
+	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, showTabLabel: 15, cacheScrollPositions: true, cacheSearchBar: true, enableFirstLetterNav: true, letterNavMode: 'shift' };
 	private injectedXButtons: WeakSet<HTMLElement> = new WeakSet();
 	private scrollCache: Map<string, number> = new Map();
 	private foldStateCache: Map<string, string[]> = new Map();
-	savedSearchQuery: string = '';
-	private searchBarRestored: boolean = false;
-	private searchBarRestoring: boolean = false;
+	savedSearchQueries: Record<string, string> = {};
+	private searchBarRestoredTabs: Set<string> = new Set();
+	private searchBarRestoringTabs: Set<string> = new Set();
 	private modalWasClosed: boolean = false;
 	private lastLetterPressed: string = '';
 	private lastLetterIndex: number = -1;
@@ -69,6 +72,11 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private isCommunityPluginsTab(tabId: string | null): boolean {
 		if (!tabId) return false;
 		return tabId === 'community-plugins' || tabId === 'community plugins';
+	}
+
+	private isSearchBarTab(tabId: string | null): boolean {
+		if (!tabId) return false;
+		return this.isCommunityPluginsTab(tabId) || tabId === 'hotkeys';
 	}
 
 	async onload() {
@@ -163,11 +171,22 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.settings.enableBrowseButtons = data.enableBrowseButtons ?? true;
 				this.settings.browseDefaultInstalled = data.browseDefaultInstalled ?? false;
 				this.settings.transparentNavBar = data.transparentNavBar ?? false;
+				const rawLabel = data.showTabLabel;
+				if (typeof rawLabel === 'number') this.settings.showTabLabel = rawLabel;
+				else if (rawLabel === 'off' || rawLabel === false) this.settings.showTabLabel = 0;
+				else if (rawLabel === 'small' || rawLabel === true) this.settings.showTabLabel = 15;
+				else if (rawLabel === 'medium') this.settings.showTabLabel = 17;
+				else if (rawLabel === 'large') this.settings.showTabLabel = 19;
+				else this.settings.showTabLabel = 15;
 				this.settings.cacheScrollPositions = data.cacheScrollPositions ?? true;
 				this.settings.cacheSearchBar = data.cacheSearchBar ?? true;
 				this.settings.enableFirstLetterNav = data.enableFirstLetterNav ?? true;
-				this.settings.letterNavMode = data.letterNavMode ?? 'tab';
-				this.savedSearchQuery = data.savedSearchQuery ?? '';
+				this.settings.letterNavMode = data.letterNavMode ?? 'shift';
+				// Load search queries (with legacy support)
+				this.savedSearchQueries = data.savedSearchQueries ?? {};
+				if (data.savedSearchQuery && !this.savedSearchQueries['community-plugins']) {
+					this.savedSearchQueries['community-plugins'] = data.savedSearchQuery;
+				}
 			}
 			if (data && data.history) {
 				// Clean up invalid history entries (empty strings, null, undefined)
@@ -201,11 +220,12 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				enableBrowseButtons: this.settings.enableBrowseButtons,
 				browseDefaultInstalled: this.settings.browseDefaultInstalled,
 				transparentNavBar: this.settings.transparentNavBar,
+				showTabLabel: this.settings.showTabLabel,
 				cacheScrollPositions: this.settings.cacheScrollPositions,
 				cacheSearchBar: this.settings.cacheSearchBar,
 				enableFirstLetterNav: this.settings.enableFirstLetterNav,
 				letterNavMode: this.settings.letterNavMode,
-				savedSearchQuery: this.savedSearchQuery,
+				savedSearchQueries: this.savedSearchQueries,
 			};
 			await this.saveData(data);
 		} catch (error) {
@@ -316,11 +336,24 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			this.openPluginInBrowse();
 		};
 
+		const tabLabel = doc.createElement('div');
+		tabLabel.className = 'settings-nav-tab-label';
+		tabLabel.style.cssText = `
+			font-size: 12px;
+			color: var(--text-muted);
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			max-width: 200px;
+			pointer-events: none;
+		`;
+
 		this.floatingPane.appendChild(backBtn);
 		this.floatingPane.appendChild(forwardBtn);
 		this.floatingPane.appendChild(indicator);
 		this.floatingPane.appendChild(separator);
 		this.floatingPane.appendChild(pluginInfoBtn);
+		this.floatingPane.appendChild(tabLabel);
 
 		targetParent.appendChild(this.floatingPane);
 		this.updateButtonStates();
@@ -353,7 +386,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				align-items: center !important;
 				gap: 8px !important;
 				padding: 6px 10px !important;
-				background: var(--background-secondary) !important;
+				background: color-mix(in srgb, var(--background-secondary) 60%, transparent) !important;
+				backdrop-filter: blur(8px) !important;
+				-webkit-backdrop-filter: blur(8px) !important;
 				border: 1px solid var(--background-modifier-border) !important;
 				border-radius: 8px !important;
 				box-shadow: var(--shadow-l) !important;
@@ -434,7 +469,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				}
 			} else {
 				this.floatingPane.style.display = 'none';
-				this.searchBarRestored = false;
+				this.searchBarRestoredTabs.clear();
 				this.modalWasClosed = true;
 			}
 
@@ -482,20 +517,22 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.saveFoldState(this.lastActiveTabId);
 			}
 
-			// Search bar: save when on community-plugins, restore on first visit
-			if (this.isCommunityPluginsTab(this.lastActiveTabId)) {
-				if (!this.searchBarRestored) {
-					this.searchBarRestored = true;
-					if (this.savedSearchQuery) {
-						this.searchBarRestoring = true;
-						this.restoreSearchBarContent();
+			// Search bar: save/restore for tabs with search bars (community-plugins, hotkeys)
+			if (this.lastActiveTabId && this.isSearchBarTab(this.lastActiveTabId)) {
+				const tab = this.lastActiveTabId;
+				if (!this.searchBarRestoredTabs.has(tab)) {
+					this.searchBarRestoredTabs.add(tab);
+					if (this.savedSearchQueries[tab]) {
+						this.searchBarRestoringTabs.add(tab);
+						this.restoreSearchBarContent(tab);
 					}
-				} else if (!this.searchBarRestoring) {
-					this.saveSearchBarContent();
+				} else if (!this.searchBarRestoringTabs.has(tab)) {
+					this.saveSearchBarContent(tab);
 				}
 			} else {
-				this.searchBarRestored = false;
-				this.searchBarRestoring = false;
+				// Not on a search bar tab — clear all restore flags so they restore on next visit
+				this.searchBarRestoredTabs.clear();
+				this.searchBarRestoringTabs.clear();
 			}
 
 			this.injectXButtons();
@@ -1061,15 +1098,15 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.restoreFoldState(tabId, () => {
 			this.restoreScrollPosition(tabId);
 		});
-		if (this.isCommunityPluginsTab(tabId)) {
-			this.restoreSearchBarContent();
+		if (this.isSearchBarTab(tabId)) {
+			this.restoreSearchBarContent(tabId);
 		}
 
 		// Increased timeout and reset flag to prevent re-opening loops
 		setTimeout(() => { this.isNavigatingProgrammatically = false; }, 1500);
 	}
 
-	private updateButtonStates() {
+	updateButtonStates() {
 		if (!this.floatingPane) return;
 		const canBack = this.currentIndex > 0;
 		const canForward = this.currentIndex < this.history.length - 1;
@@ -1102,6 +1139,29 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			// Hide button and separator when not on a community plugin tab
 			pluginInfoBtn.style.display = isPluginTab ? 'flex' : 'none';
 			if (separatorEl) separatorEl.style.display = isPluginTab ? '' : 'none';
+		}
+
+		// Update tab label
+		const tabLabel = this.floatingPane.querySelector('.settings-nav-tab-label') as HTMLElement;
+		if (tabLabel) {
+			if (this.settings.showTabLabel > 0) {
+				tabLabel.style.fontSize = this.settings.showTabLabel + 'px';
+				const doc = activeDocument || document;
+				const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
+				const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
+				let tabName = '';
+				if (modalContainer) {
+					const modal = modalContainer.querySelector('.modal') as HTMLElement;
+					if (modal) {
+						const activeTab = modal.querySelector('.vertical-tab-nav-item.is-active');
+						tabName = activeTab?.textContent?.trim() || '';
+					}
+				}
+				tabLabel.textContent = tabName;
+				tabLabel.style.display = tabName ? '' : 'none';
+			} else {
+				tabLabel.style.display = 'none';
+			}
 		}
 	}
 
@@ -1275,25 +1335,28 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		) || null;
 	}
 
-	private saveSearchBarContent() {
+	private saveSearchBarContent(tabId?: string) {
 		if (!this.settings.cacheSearchBar) return;
+		const tab = tabId || this.lastActiveTabId || '';
 		const searchInput = this.findSearchInput();
 		if (searchInput) {
 			const newValue = searchInput.value;
-			if (newValue !== this.savedSearchQuery) {
-				this.savedSearchQuery = newValue;
+			if (newValue !== this.savedSearchQueries[tab]) {
+				this.savedSearchQueries[tab] = newValue;
 				this.savePluginData();
 			}
 		}
 	}
 
-	private restoreSearchBarContent() {
-		if (!this.settings.cacheSearchBar || !this.savedSearchQuery) {
-			this.searchBarRestoring = false;
+	private restoreSearchBarContent(tabId?: string) {
+		const tab = tabId || this.lastActiveTabId || '';
+		const query = this.savedSearchQueries[tab];
+		if (!this.settings.cacheSearchBar || !query) {
+			this.searchBarRestoringTabs.delete(tab);
 			return;
 		}
 
-		const queryToRestore = this.savedSearchQuery;
+		const queryToRestore = query;
 
 		// Keep trying to set the value until it sticks.
 		// Obsidian re-renders the plugin list on input events, recreating the input element.
@@ -1303,7 +1366,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			const input = this.findSearchInput();
 			if (!input) {
 				if (attempts > 0) setTimeout(() => ensureValue(attempts - 1), 100);
-				else this.searchBarRestoring = false;
+				else this.searchBarRestoringTabs.delete(tab);
 				return;
 			}
 
@@ -1311,7 +1374,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				stableCount++;
 				// Consider it stable after 3 consecutive checks (~450ms)
 				if (stableCount >= 3) {
-					this.searchBarRestoring = false;
+					this.searchBarRestoringTabs.delete(tab);
 					return;
 				}
 			} else {
@@ -1323,7 +1386,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			if (attempts > 0) {
 				setTimeout(() => ensureValue(attempts - 1), 150);
 			} else {
-				this.searchBarRestoring = false;
+				this.searchBarRestoringTabs.delete(tab);
 			}
 		};
 		setTimeout(() => ensureValue(20), 100);
@@ -1456,7 +1519,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			}
 		};
 
-		const getTooltipText = (shiftHeld: boolean) => {
+		const getTooltipText = (shiftHeld: boolean, ctrlHeld: boolean) => {
+			if (ctrlHeld) return 'Reload plugin';
 			if (shiftHeld && isCommunity) return 'Delete plugin';
 			return 'Disable plugin';
 		};
@@ -1464,9 +1528,11 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		let isHoveringX = false;
 		let currentShift = false;
 
+		let currentCtrl = false;
+
 		xButton.addEventListener('mouseenter', () => {
 			isHoveringX = true;
-			showTooltip(getTooltipText(currentShift), currentShift && isCommunity);
+			showTooltip(getTooltipText(currentShift, currentCtrl), currentShift && isCommunity);
 		});
 
 		xButton.addEventListener('mouseleave', () => {
@@ -1478,33 +1544,51 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			e.stopPropagation();
 			e.preventDefault();
 			hideTooltip();
-			if (e.shiftKey && isCommunity) {
+			if (e.ctrlKey) {
+				// Ctrl+Click: reload plugin (disable then re-enable)
+				const plugins = (this.app as any).plugins;
+				if (isCommunity) {
+					const pluginInfo = this.getPluginInfoForTab(tabId);
+					if (pluginInfo) {
+						plugins.disablePlugin(pluginInfo.id).then(() => {
+							setTimeout(() => plugins.enablePlugin(pluginInfo.id), 500);
+						});
+					}
+				} else {
+					const internalPlugin = (this.app as any).internalPlugins?.getPluginById(tabId);
+					if (internalPlugin) {
+						internalPlugin.disable();
+						setTimeout(() => internalPlugin.enable(), 500);
+					}
+				}
+			} else if (e.shiftKey && isCommunity) {
 				this.handleDeletePlugin(tabId);
 			} else {
 				this.handleDisablePlugin(tabId, isCommunity);
 			}
 		});
 
-		// Track shift key for visual feedback and tooltip update
-		const updateShiftState = (e: KeyboardEvent) => {
-			if (!isCommunity) return;
+		// Track shift/ctrl keys for visual feedback and tooltip update
+		const updateModifierState = (e: KeyboardEvent) => {
+			currentCtrl = e.ctrlKey;
 			currentShift = e.shiftKey;
-			xButton.classList.toggle('shift-held', currentShift);
+			if (isCommunity) xButton.classList.toggle('shift-held', currentShift && !currentCtrl);
 			if (isHoveringX) {
-				showTooltip(getTooltipText(currentShift), currentShift && isCommunity);
+				showTooltip(getTooltipText(currentShift, currentCtrl), currentShift && !currentCtrl && isCommunity);
 			}
 		};
 
 		navItem.addEventListener('mouseenter', () => {
-			document.addEventListener('keydown', updateShiftState);
-			document.addEventListener('keyup', updateShiftState);
+			document.addEventListener('keydown', updateModifierState);
+			document.addEventListener('keyup', updateModifierState);
 		});
 
 		navItem.addEventListener('mouseleave', () => {
-			document.removeEventListener('keydown', updateShiftState);
-			document.removeEventListener('keyup', updateShiftState);
+			document.removeEventListener('keydown', updateModifierState);
+			document.removeEventListener('keyup', updateModifierState);
 			xButton.classList.remove('shift-held');
 			currentShift = false;
+			currentCtrl = false;
 			hideTooltip();
 		});
 
@@ -1602,9 +1686,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				const manifests = (this.app as any).plugins?.manifests;
 				const manifest = manifests?.[pluginInfo.id];
 				const displayName = manifest?.name || pluginInfo.name;
-				this.savedSearchQuery = displayName;
-				this.searchBarRestoring = true;
-				this.searchBarRestored = true;
+				this.savedSearchQueries['community-plugins'] = displayName;
+				this.searchBarRestoringTabs.add('community-plugins');
+				this.searchBarRestoredTabs.add('community-plugins');
 				this.recordTabChange('community-plugins');
 				this.performNavigation('community-plugins');
 			} else {
@@ -1688,40 +1772,20 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl)
-			.setName('Quick disable/delete buttons')
-			.setDesc('Show X buttons on plugin tabs in the settings sidebar. Click to disable, Shift+Click to delete.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableXButtons)
-				.onChange(async (value) => {
-					this.plugin.settings.enableXButtons = value;
-					await this.plugin.savePluginData();
-					if (!value) {
-						this.plugin.removeAllXButtons();
-					}
-				}));
+		// --- Navigation Bar ---
+		containerEl.createEl('h3', { text: 'Navigation Bar' });
 
 		new Setting(containerEl)
-			.setName('Browse in Community Plugins buttons')
-			.setDesc('Show a puzzle icon on community plugin tabs to quickly view them in the Community Plugins browser.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableBrowseButtons)
+			.setName('Show tab name')
+			.setDesc('Display the current settings tab name on the navigation bar. 0 = off, 12–24 = font size.')
+			.addSlider(slider => slider
+				.setLimits(0, 24, 1)
+				.setValue(this.plugin.settings.showTabLabel)
+				.setDynamicTooltip()
 				.onChange(async (value) => {
-					this.plugin.settings.enableBrowseButtons = value;
+					this.plugin.settings.showTabLabel = value;
 					await this.plugin.savePluginData();
-					if (!value) {
-						this.plugin.removeAllXButtons();
-					}
-				}));
-
-		new Setting(containerEl)
-			.setName('Browse button defaults to installed plugins')
-			.setDesc('Swap the browse button behavior: normal click opens installed plugin settings, Shift+click opens in Community Plugins browser.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.browseDefaultInstalled)
-				.onChange(async (value) => {
-					this.plugin.settings.browseDefaultInstalled = value;
-					await this.plugin.savePluginData();
+					this.plugin.updateButtonStates();
 				}));
 
 		new Setting(containerEl)
@@ -1735,6 +1799,59 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 					this.plugin.applyNavBarStyle();
 				}));
 
+		// --- Sidebar Buttons ---
+		containerEl.createEl('h3', { text: 'Sidebar Buttons' });
+
+		new Setting(containerEl)
+			.setName('Quick disable/reload/delete button')
+			.setDesc('Show X buttons on plugin tabs in the settings sidebar. Click to disable, Ctrl+Click to reload (disable then re-enable), Shift+Click to delete.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableXButtons)
+				.onChange(async (value) => {
+					this.plugin.settings.enableXButtons = value;
+					await this.plugin.savePluginData();
+					if (!value) {
+						this.plugin.removeAllXButtons();
+					}
+				}));
+
+		let browseDefaultSetting: Setting | null = null;
+
+		const updateBrowseDefaultVisibility = () => {
+			if (browseDefaultSetting) {
+				browseDefaultSetting.settingEl.style.display = this.plugin.settings.enableBrowseButtons ? '' : 'none';
+			}
+		};
+
+		new Setting(containerEl)
+			.setName('Browse in Community Plugins buttons')
+			.setDesc('Show a puzzle icon on community plugin tabs to quickly view them in the Community Plugins browser.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableBrowseButtons)
+				.onChange(async (value) => {
+					this.plugin.settings.enableBrowseButtons = value;
+					await this.plugin.savePluginData();
+					if (!value) {
+						this.plugin.removeAllXButtons();
+					}
+					updateBrowseDefaultVisibility();
+				}));
+
+		browseDefaultSetting = new Setting(containerEl)
+			.setName('Browse button defaults to installed plugins')
+			.setDesc('Swap the browse button behavior: normal click opens installed plugin settings, Shift+click opens in Community Plugins browser.')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.browseDefaultInstalled)
+				.onChange(async (value) => {
+					this.plugin.settings.browseDefaultInstalled = value;
+					await this.plugin.savePluginData();
+				}));
+
+		updateBrowseDefaultVisibility();
+
+		// --- Persistence ---
+		containerEl.createEl('h3', { text: 'Persistence' });
+
 		new Setting(containerEl)
 			.setName('Remember scroll positions')
 			.setDesc('Cache scroll positions for each settings tab and restore them when navigating back.')
@@ -1746,31 +1863,43 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Remember plugin search filter')
-			.setDesc('Persist the "Search installed plugins..." text across settings sessions.')
+			.setName('Remember search filters')
+			.setDesc('Persist search bar text on community plugins and hotkeys tabs across settings sessions.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.cacheSearchBar)
 				.onChange(async (value) => {
 					this.plugin.settings.cacheSearchBar = value;
 					await this.plugin.savePluginData();
 					if (!value) {
-						this.plugin.savedSearchQuery = '';
+						this.plugin.savedSearchQueries = {};
 						await this.plugin.savePluginData();
 					}
 				}));
 
+		// --- First-Letter Navigation ---
+		containerEl.createEl('h3', { text: 'First-Letter Navigation' });
+
+		let letterNavModeSetting: Setting | null = null;
+
+		const updateLetterNavModeVisibility = () => {
+			if (letterNavModeSetting) {
+				letterNavModeSetting.settingEl.style.display = this.plugin.settings.enableFirstLetterNav ? '' : 'none';
+			}
+		};
+
 		new Setting(containerEl)
-			.setName('First-letter navigation')
+			.setName('Enable first-letter navigation')
 			.setDesc('Press a letter key to jump to matching items in the sidebar and plugin lists. Press again to cycle through matches.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.enableFirstLetterNav)
 				.onChange(async (value) => {
 					this.plugin.settings.enableFirstLetterNav = value;
 					await this.plugin.savePluginData();
+					updateLetterNavModeVisibility();
 				}));
 
-		new Setting(containerEl)
-			.setName('First-letter navigation mode')
+		letterNavModeSetting = new Setting(containerEl)
+			.setName('Navigation mode')
 			.setDesc('How to switch between sidebar and content navigation.')
 			.addDropdown(dropdown => dropdown
 				.addOption('tab', 'Ctrl+Tab toggles focus')
@@ -1780,5 +1909,7 @@ class SettingsNavigatorSettingTab extends PluginSettingTab {
 					this.plugin.settings.letterNavMode = value as 'tab' | 'shift';
 					await this.plugin.savePluginData();
 				}));
+
+		updateLetterNavModeVisibility();
 	}
 }
