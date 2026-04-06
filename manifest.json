@@ -1,7 +1,7 @@
 {
 	"id": "settings-navigator",
 	"name": "Settings Navigator",
-	"version": "0.95",
+	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Adds back and forth navigation arrows to the settings",
 	"author": "PulseRH",
