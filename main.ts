@@ -226,7 +226,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	}
 
 	private isCommunityPluginTab(tabId: string): boolean {
-		if (!tabId || tabId.startsWith('plugin:') || tabId === 'browse') return false;
+		if (!tabId || tabId.startsWith('plugin:') || tabId === 'browse' || tabId.startsWith('browse:')) return false;
 		if (CORE_TAB_IDS.has(tabId)) return false;
 		const plugins = (this.app as any).plugins?.manifests;
 		if (!plugins) return false;
@@ -254,7 +254,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		return null;
 	}
 
-	private openPluginInBrowse() {
+	private openPluginInBrowse(e?: MouseEvent) {
 		const doc = activeDocument || document;
 		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
 		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
@@ -271,9 +271,25 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const pluginInfo = this.getPluginInfoForTab(tabId);
 		if (!pluginInfo) return;
 
-		const navTarget = `plugin:${pluginInfo.name}:${pluginInfo.id}`;
-		this.recordTabChange(navTarget);
-		this.performNavigation(navTarget);
+		const swapped = this.settings.browseDefaultInstalled;
+		const goToInstalled = swapped ? !(e?.shiftKey) : !!(e?.shiftKey);
+
+		if (goToInstalled) {
+			// Navigate to community-plugins tab and search for the plugin
+			const manifests = (this.app as any).plugins?.manifests;
+			const manifest = manifests?.[pluginInfo.id];
+			const displayName = manifest?.name || pluginInfo.name;
+			this.savedSearchQueries['community-plugins'] = displayName;
+			this.searchBarRestoringTabs.add('community-plugins');
+			this.searchBarRestoredTabs.add('community-plugins');
+			this.recordTabChange('community-plugins');
+			this.performNavigation('community-plugins');
+		} else {
+			// Open community browse modal on top of settings
+			this.isNavigatingProgrammatically = true;
+			window.open(`obsidian://show-plugin?id=${pluginInfo.id}`);
+			setTimeout(() => { this.isNavigatingProgrammatically = false; }, 2000);
+		}
 	}
 
 	private ensureFloatingPane() {
@@ -321,11 +337,71 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 		const pluginInfoBtn = doc.createElement('div');
 		pluginInfoBtn.className = 'settings-nav-float-button settings-nav-plugin-info-btn clickable-icon';
-		pluginInfoBtn.setAttribute('aria-label', 'View in Community Plugins');
 		setIcon(pluginInfoBtn, 'puzzle');
+
+		// Dynamic tooltip that changes with Shift key
+		let navTooltip: HTMLElement | null = null;
+		let navIsHovering = false;
+		let navCurrentShift = false;
+
+		const getNavTooltipText = (shiftHeld: boolean) => {
+			const swapped = this.settings.browseDefaultInstalled;
+			const showInstalled = swapped ? !shiftHeld : shiftHeld;
+			return showInstalled ? 'View in installed plugins' : 'View in Community Plugins';
+		};
+
+		const positionNavTooltip = () => {
+			if (!navTooltip) return;
+			const rect = pluginInfoBtn.getBoundingClientRect();
+			const tipRect = navTooltip.getBoundingClientRect();
+			navTooltip.style.left = `${rect.left + rect.width / 2 - tipRect.width / 2}px`;
+			navTooltip.style.top = `${rect.top - tipRect.height - 4}px`;
+		};
+
+		const showNavTooltip = (text: string) => {
+			if (navTooltip) {
+				if (navTooltip.textContent !== text) {
+					navTooltip.textContent = text;
+					positionNavTooltip();
+				}
+				return;
+			}
+			navTooltip = doc.createElement('div');
+			navTooltip.className = 'tooltip mod-top';
+			navTooltip.textContent = text;
+			navTooltip.style.cssText = 'position: fixed; z-index: 2147483647; pointer-events: none;';
+			doc.body.appendChild(navTooltip);
+			positionNavTooltip();
+		};
+
+		const hideNavTooltip = () => {
+			if (navTooltip) { navTooltip.remove(); navTooltip = null; }
+		};
+
+		const updateNavShift = (ev: KeyboardEvent) => {
+			navCurrentShift = ev.shiftKey;
+			if (navIsHovering) showNavTooltip(getNavTooltipText(navCurrentShift));
+		};
+
+		pluginInfoBtn.addEventListener('mouseenter', () => {
+			navIsHovering = true;
+			showNavTooltip(getNavTooltipText(navCurrentShift));
+			doc.addEventListener('keydown', updateNavShift);
+			doc.addEventListener('keyup', updateNavShift);
+		});
+
+		pluginInfoBtn.addEventListener('mouseleave', () => {
+			navIsHovering = false;
+			hideNavTooltip();
+			doc.removeEventListener('keydown', updateNavShift);
+			doc.removeEventListener('keyup', updateNavShift);
+			navCurrentShift = false;
+		});
+
 		pluginInfoBtn.onclick = (e) => {
 			e.stopPropagation();
-			this.openPluginInBrowse();
+			hideNavTooltip();
+			this.openPluginInBrowse(e);
 		};
 
 		const tabLabel = doc.createElement('div');
@@ -569,13 +645,21 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 					}
 
 					let name = "";
-					const nameEl = modalContainer.querySelector('.community-modal-details-name')
-						|| modalContainer.querySelector('.setting-item-info-name')
-						|| modalContainer.querySelector('.community-modal-details h1, .community-modal-details h2')
-						|| modalContainer.querySelector('.modal-title');
+					// Prefer the selected sidebar item name — it's the most reliable source
+					// (detail view headings can pick up README content like "👋 Overview")
+					const selectedItem = modalContainer.querySelector('.community-item.is-selected .community-item-name');
+					const nameEl = selectedItem
+						|| modalContainer.querySelector('.community-modal-details-name')
+						|| modalContainer.querySelector('.setting-item-info-name');
 
 					if (nameEl && nameEl.textContent && !nameEl.textContent.toLowerCase().includes('community plugins')) {
-						name = nameEl.textContent.trim().toLowerCase();
+						// Strip "Installed"/"Updated" flair badges from sidebar item names
+						let rawName = nameEl.textContent.trim();
+						const flair = nameEl.querySelector('.flair');
+						if (flair) {
+							rawName = rawName.replace(flair.textContent || '', '').trim();
+						}
+						name = rawName.toLowerCase();
 						if (pluginId) {
 							return `plugin:${name}:${pluginId}`;
 						}
@@ -589,6 +673,17 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			if (this.lastActiveTabId?.startsWith('plugin:')) {
 				// Details might be loading — keep current state to avoid phantom entries
 				return this.lastActiveTabId;
+			}
+			// Capture the search query as part of the browse entry,
+			// but only when the search input is not focused (user finished typing)
+			const searchInput = modalContainer.querySelector('.search-input-container input[type="search"], .community-modal-search-container input') as HTMLInputElement;
+			const query = searchInput?.value?.trim();
+			if (searchInput && doc.activeElement === searchInput && query) {
+				// Still typing a search — keep current state to avoid recording every keystroke
+				return this.lastActiveTabId || 'browse';
+			}
+			if (query) {
+				return `browse:${query.toLowerCase()}`;
 			}
 			return 'browse';
 		}
@@ -675,6 +770,42 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			}
 		}
 
+		// When clicking a plugin in the community modal, ensure a browse entry
+		// (with search query if any) exists before the first plugin entry so back
+		// navigation returns to the correct browse state with search preserved
+		if (normalizedId.startsWith('plugin:')) {
+			const doc = activeDocument || document;
+			const communityModal = doc.querySelector('.mod-community-modal, .mod-community-plugin');
+			if (communityModal) {
+				const searchInput = communityModal.querySelector('.search-input-container input[type="search"], .community-modal-search-container input') as HTMLInputElement;
+				const query = searchInput?.value?.trim()?.toLowerCase();
+				const browseEntry = query ? `browse:${query}` : 'browse';
+				if (currentTabId?.startsWith('browse:') && browseEntry === currentTabId) {
+					// Same browse:query — nothing to do
+				} else if (currentTabId === 'browse' && query) {
+					// Had plain browse, now have a search — add browse:query as new entry
+					// (keep plain browse so back can return to the no-search state)
+					if (this.currentIndex < this.history.length - 1) {
+						this.history = this.history.slice(0, this.currentIndex + 1);
+					}
+					this.history.push({ tabId: browseEntry, timestamp: Date.now() });
+					if (this.history.length > 50) this.history.shift();
+					this.currentIndex = this.history.length - 1;
+				} else if (currentTabId?.startsWith('browse:') && browseEntry !== currentTabId) {
+					// Different search query — update in place
+					this.history[this.currentIndex].tabId = browseEntry;
+				} else if (!currentTabId?.startsWith('plugin:') && !currentTabId?.startsWith('browse')) {
+					// Transitioning from a non-plugin, non-browse state — insert a browse entry
+					if (this.currentIndex < this.history.length - 1) {
+						this.history = this.history.slice(0, this.currentIndex + 1);
+					}
+					this.history.push({ tabId: browseEntry, timestamp: Date.now() });
+					if (this.history.length > 50) this.history.shift();
+					this.currentIndex = this.history.length - 1;
+				}
+			}
+		}
+
 		// Update tracking before recording
 		this.lastActiveTabId = normalizedId;
 		this.lastRecordTime = now;
@@ -703,15 +834,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
 		const startIndex = this.currentIndex;
 
-		// Skip back past invalid entries, entries matching current tab, and transitional 'browse' entries
+		// Skip back past invalid entries and entries matching current tab
 		while (this.currentIndex > 0) {
 			this.currentIndex--;
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
-			// Skip 'browse' entries — they're transitional (community modal just opened, no plugin selected)
-			if (entry.tabId === 'browse') continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
@@ -730,15 +859,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
 		const startIndex = this.currentIndex;
 
-		// Skip forward past invalid entries, entries matching current tab, and transitional 'browse' entries
+		// Skip forward past invalid entries and entries matching current tab
 		while (this.currentIndex < this.history.length - 1) {
 			this.currentIndex++;
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
 			if (entry.tabId === currentTabId) continue;
-			// Skip 'browse' entries — they're transitional (community modal just opened, no plugin selected)
-			if (entry.tabId === 'browse') continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
@@ -861,15 +988,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		};
 
 		try {
-			if (tabId.startsWith('plugin:') || tabId.startsWith('browse:')) {
-				const isQuery = tabId.startsWith('browse:');
-				const fullTarget = isQuery ? tabId.substring(7) : tabId.substring(7);
+			if (tabId.startsWith('plugin:')) {
+				const fullTarget = tabId.substring(7);
 				// Handle plugin:name:id format
 				const parts = fullTarget.split(':');
 				const target = parts[0]; // Plugin name
 				const pluginId = parts.length > 1 ? parts[1] : null; // Plugin ID if available
 
-				if (!isQuery) {
+				{
 					// Navigate to a specific community plugin's details by clicking its sidebar item
 					const topmostModal = getTopmostModal();
 					const communityModal = topmostModal?.querySelector('.mod-community-modal, .mod-community-plugin');
@@ -916,46 +1042,31 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 						}, 300);
 						return;
 					}
-				} else if (isQuery) {
-					// For search queries, we need to interact with the browse modal search
-					let topmostModal = getTopmostModal();
-					const isCommunityModal = topmostModal?.querySelector('.mod-community-modal, .community-modal, .mod-community-plugin');
-					if (!topmostModal || !isCommunityModal) {
-						setting.openTabById('community-plugins');
-						setTimeout(() => {
-							const newTop = getTopmostModal();
-							const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
-								.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
-							if (browseBtn) {
-								browseBtn.click();
-								setTimeout(() => this.performNavigation(tabId), 500);
-							}
-						}, 300);
-						return;
-					}
-					const searchInput = topmostModal.querySelector('.community-modal-search-container input, .mod-community-modal input[type="search"], .mod-community-modal input[type="text"], .mod-community-plugin input[type="search"], .mod-community-plugin input[type="text"]') as HTMLInputElement;
+				}
+			} else if (tabId === 'browse' || tabId.startsWith('browse:')) {
+				const browseQuery = tabId.startsWith('browse:') ? tabId.substring(7) : '';
+				let topmostModal = getTopmostModal();
+				const communityModal = topmostModal?.querySelector('.mod-community-modal, .mod-community-plugin');
+				if (communityModal) {
+					// Community modal is open — remove details pane and deselect
+					// to restore the full-width browse grid
+					const selected = communityModal.querySelector('.community-item.is-selected');
+					if (selected) selected.classList.remove('is-selected');
+					const details = communityModal.querySelector('.community-modal-details');
+					if (details) details.remove();
+					// Restore or clear the search query
+					const searchInput = communityModal.querySelector('.search-input-container input[type="search"], .community-modal-search-container input') as HTMLInputElement;
 					if (searchInput) {
-						searchInput.value = target;
+						searchInput.value = browseQuery;
 						searchInput.dispatchEvent(new Event('input', { bubbles: true }));
 					}
-				}
-			} else if (tabId === 'browse') {
-				let topmostModal = getTopmostModal();
-				if (topmostModal) {
-					// Check if we are in details view, if so click back
-					const backBtn = topmostModal.querySelector('.modal-title-back') as HTMLElement;
-					if (backBtn) {
-						backBtn.click();
-					} else {
-						// If we are already in Browse but not in details, nothing to do
-						const browseSearch = topmostModal.querySelector('.community-modal-search-container');
-						if (!browseSearch) {
-							const browseBtn = Array.from(topmostModal?.querySelectorAll('.mod-cta') || [])
-								.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
-							if (browseBtn) browseBtn.click();
-						}
-					}
+				} else if (topmostModal) {
+					// Settings modal open but no browse modal — click Browse button
+					const browseBtn = Array.from(topmostModal.querySelectorAll('.mod-cta') || [])
+						.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
+					if (browseBtn) browseBtn.click();
 				} else {
+					// No modals — open settings, community plugins, then browse
 					setting.openTabById('community-plugins');
 					setTimeout(() => {
 						const newTop = getTopmostModal();
@@ -1405,7 +1516,6 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 		const showTooltip = (text: string, isDelete: boolean = false) => {
 			if (tooltip) {
-				// Just update text and reposition if already showing
 				if (tooltip.textContent !== text) {
 					tooltip.textContent = text;
 					tooltip.style.color = isDelete ? 'var(--text-error)' : '';
@@ -1602,10 +1712,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.recordTabChange('community-plugins');
 				this.performNavigation('community-plugins');
 			} else {
-				// Open in Community Plugins browser
-				const navTarget = `plugin:${pluginInfo.name}:${pluginInfo.id}`;
-				this.recordTabChange(navTarget);
-				this.performNavigation(navTarget);
+				// Open in Community Plugins browser — keep settings open behind it
+				this.isNavigatingProgrammatically = true;
+				window.open(`obsidian://show-plugin?id=${pluginInfo.id}`);
+				setTimeout(() => { this.isNavigatingProgrammatically = false; }, 2000);
 			}
 		});
 
