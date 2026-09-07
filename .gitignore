@@ -3,8 +3,10 @@ node_modules/
 *.log
 main.js
 main.js.map
-versions.json
 .claude/
 .cursor/
 .obsidian/
 data.json
+
+release/
+*.zip

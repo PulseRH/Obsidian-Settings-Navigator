@@ -1,13 +1,10 @@
 {
-	"id": "settings-navigator",
-	"name": "Settings Navigator",
-	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Adds back and forth navigation arrows to the settings",
-	"author": "PulseRH",
-	"authorUrl": "https://github.com/PulseRH",
-	"fundingUrl": "",
-	"isDesktopOnly": false
+  "id": "settings-navigator",
+  "name": "Settings Navigator",
+  "version": "1.1.1",
+  "minAppVersion": "1.12.7",
+  "description": "Navigate settings history, manage plugins from the sidebar, and remember search filters and expanded sections.",
+  "author": "PulseRH",
+  "authorUrl": "https://github.com/PulseRH",
+  "isDesktopOnly": false
 }
-
-

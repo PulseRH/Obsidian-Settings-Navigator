@@ -1,4 +1,6 @@
-import { Plugin, PluginSettingTab, Setting, setIcon, App } from 'obsidian';
+import { Plugin, setIcon, setTooltip, displayTooltip, Platform, Notice, requestUrl, Component } from 'obsidian';
+import { SettingsNavigatorSettingTab } from './settings-tab';
+import { corePluginId, type InternalApp, type InternalTab } from './internal-api';
 
 const CORE_TAB_IDS = new Set([
 	'editor',
@@ -14,6 +16,8 @@ const CORE_TAB_IDS = new Set([
 interface SettingsHistory {
 	tabId: string;
 	timestamp: number;
+	installedQuery?: string; // Legacy temporary filter.
+	searchQuery?: string;
 }
 
 interface PluginData {
@@ -24,19 +28,22 @@ interface PluginData {
 	enableBrowseButtons?: boolean;
 	browseDefaultInstalled?: boolean;
 	transparentNavBar?: boolean;
-	showTabLabel?: string | number;
+	showTabLabel?: string | number | boolean;
 	cacheScrollPositions?: boolean;
 	cacheSearchBar?: boolean;
 	enableFirstLetterNav?: boolean;
 	letterNavMode?: 'tab' | 'shift';
 	savedSearchQuery?: string; // legacy
 	savedSearchQueries?: Record<string, string>;
+	foldStates?: Record<string, Record<string, boolean>>;
+	ctrlClickOpensGithub?: boolean;
 }
 
 interface PluginSettings {
 	enableXButtons: boolean;
 	enableBrowseButtons: boolean;
 	browseDefaultInstalled: boolean;
+	ctrlClickOpensGithub: boolean;
 	transparentNavBar: boolean;
 	showTabLabel: number;
 	cacheScrollPositions: boolean;
@@ -46,6 +53,7 @@ interface PluginSettings {
 }
 
 export default class SettingsBackAndForthPlugin extends Plugin {
+	private get internalApp(): InternalApp { return this.app; }
 	private history: SettingsHistory[] = [];
 	private currentIndex: number = -1;
 	private isNavigatingProgrammatically: boolean = false;
@@ -55,13 +63,29 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private pollInterval: number | null = null;
 	private keydownHandler: ((e: KeyboardEvent) => void) | null = null;
 	private mouseHandler: ((e: MouseEvent) => void) | null = null;
-	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, transparentNavBar: false, showTabLabel: 15, cacheScrollPositions: true, cacheSearchBar: true, enableFirstLetterNav: true, letterNavMode: 'shift' };
+	settings: PluginSettings = { enableXButtons: true, enableBrowseButtons: true, browseDefaultInstalled: false, ctrlClickOpensGithub: false, transparentNavBar: false, showTabLabel: 15, cacheScrollPositions: true, cacheSearchBar: true, enableFirstLetterNav: true, letterNavMode: 'shift' };
 	private injectedXButtons: WeakSet<HTMLElement> = new WeakSet();
 	private scrollCache: Map<string, number> = new Map();
-	private foldStateCache: Map<string, string[]> = new Map();
+	private foldStateCache = new Map<string, Record<string, boolean>>();
+	private foldRestoring = new Set<string>();
+	private scrollRestoring = new Set<string>();
+	private viewGeneration = 0;
+	private navigationGeneration = 0;
+	private ui = new Component();
+	private paneUi = new Component();
+	private sidebarRoot: HTMLElement | null = null;
+	private eventDocuments = new Set<Document>();
+	private mousePress: { button: number; time: number; type: string } | null = null;
+	private githubRepos: Map<string, string> | null = null;
 	savedSearchQueries: Record<string, string> = {};
-	private searchBarRestoredTabs: Set<string> = new Set();
-	private searchBarRestoringTabs: Set<string> = new Set();
+	private searchVisitTab = '';
+	private temporaryInstalledQuery: string | undefined;
+	private searchGeneration = 0;
+	private searchRestoring = false;
+	private restoredSearchInput: HTMLInputElement | null = null;
+	private unloaded = false;
+	private timers = new Set<number>();
+	private saveQueue: Promise<void> = Promise.resolve();
 	private modalWasClosed: boolean = false;
 	private lastLetterPressed: string = '';
 	private lastLetterIndex: number = -1;
@@ -80,14 +104,18 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	}
 
 	async onload() {
-		console.log('[Settings Nav] Plugin loading...');
 		await this.loadSavedData();
+		this.addChild(this.ui);
+		this.addChild(this.paneUi);
 		this.addSettingTab(new SettingsNavigatorSettingTab(this.app, this));
 
 		// Direct keydown listener for Ctrl+Z/Ctrl+X and first-letter navigation
 		this.keydownHandler = (e: KeyboardEvent) => {
-			const settingsOpen = document.querySelector('.modal-container .modal');
+			const settingsOpen = this.getNavigationModal();
 			if (!settingsOpen) return;
+
+			const focused = activeDocument.activeElement as HTMLElement | null;
+			if (focused?.matches('input, textarea, [contenteditable="true"]') || focused?.isContentEditable) return;
 
 			// Ctrl+Z / Ctrl+X for back/forward
 			if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'z' || e.key === 'x')) {
@@ -112,7 +140,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			if (e.ctrlKey || e.altKey || e.metaKey) return;
 			if (!/^[a-z]$/i.test(e.key)) return;
 			// Don't capture when typing in inputs
-			const active = document.activeElement;
+			const active = activeDocument.activeElement;
 			if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)) return;
 
 			// Determine if we should target sidebar or content
@@ -127,32 +155,75 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			e.preventDefault();
 			this.handleFirstLetterNav(e.key.toLowerCase(), forceSidebar);
 		};
-		document.addEventListener('keydown', this.keydownHandler, true);
+
 
 		// Mouse 4/5 (back/forward) buttons for navigation
 		this.mouseHandler = (e: MouseEvent) => {
 			// button 3 = Mouse4 (back), button 4 = Mouse5 (forward)
 			if (e.button !== 3 && e.button !== 4) return;
-			const settingsOpen = document.querySelector('.modal-container .modal');
+			const settingsOpen = this.getNavigationModal();
 			if (!settingsOpen) return;
 			e.preventDefault();
 			e.stopPropagation();
-			if (e.button === 3) {
-				this.navigateBack();
-			} else if (e.button === 4) {
-				this.navigateForward();
+			if (this.shouldHandleMouseNavigation(e)) {
+				if (e.button === 3) this.navigateBack();
+				else this.navigateForward();
 			}
 		};
-		document.addEventListener('mousedown', this.mouseHandler, true);
-		document.addEventListener('mouseup', this.mouseHandler, true);
-		document.addEventListener('auxclick', this.mouseHandler, true);
 
 		this.app.workspace.onLayoutReady(() => {
+			if (this.unloaded) return;
 			this.ensureFloatingPane();
 			this.setupNavigationTracking();
 		});
 
 		this.ensureFloatingPane();
+		this.bindDocument(activeDocument);
+	}
+
+	private shouldHandleMouseNavigation(e: MouseEvent): boolean {
+		const now = Date.now();
+		if (e.type === 'mousedown') {
+			this.mousePress = { button: e.button, time: now, type: e.type };
+			return true;
+		}
+		const duplicate = this.mousePress?.button === e.button && this.mousePress.type !== e.type && now - this.mousePress.time < 600;
+		this.mousePress = { button: e.button, time: now, type: e.type };
+		if (duplicate) return false;
+		return true;
+	}
+
+	private bindDocument(doc: Document) {
+		if (this.eventDocuments.has(doc)) return;
+		this.eventDocuments.add(doc);
+		if (this.keydownHandler) this.registerDomEvent(doc, 'keydown', this.keydownHandler, true);
+		// Claim settings navigation before the host and other plugins' document
+		// handlers can consume the same side-button press.
+		if (this.mouseHandler && doc.defaultView) for (const type of ['mousedown', 'mouseup', 'auxclick'] as const) this.registerDomEvent(doc.defaultView, type, this.mouseHandler, true);
+		this.registerDomEvent(doc, 'input', e => {
+			if (e.isTrusted) this.captureSearchEdit(e.target);
+		}, true);
+		this.registerDomEvent(doc, 'click', e => {
+			const target = e.target as HTMLElement | null;
+			const snippet = target?.closest<HTMLElement>('.setting-item-name');
+			if (snippet && !target?.closest('a, button, input') && this.isSnippetName(snippet)) {
+				e.preventDefault();
+				void this.openSnippet(snippet.textContent?.trim() ?? '');
+			}
+			const clear = target?.closest('.search-input-clear-button');
+			const input = this.findSearchInput();
+			if (clear && input && clear.parentElement === input.parentElement) {
+				const tab = this.detectTabIdFromDOM();
+				this.defer(() => { if (this.detectTabIdFromDOM() === tab) this.captureSearchEdit(this.findSearchInput(tab)); }, 0);
+			}
+			const heading = target?.closest<HTMLElement>('.style-settings-heading');
+			if (e.isTrusted && heading && !target?.closest('button, a, input, .extra-setting-button')) this.rememberHeadingToggle(heading);
+		}, true);
+		// Rendering can replace inputs after openTab returns. Observe before the next
+		// paint, rather than repeatedly forcing old values from a timer.
+		const observer = new MutationObserver(() => { if (!this.unloaded) this.syncSearchBar(); });
+		observer.observe(doc.body, { childList: true, subtree: true });
+		this.register(() => observer.disconnect());
 	}
 
 	async loadSavedData() {
@@ -162,6 +233,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.settings.enableXButtons = data.enableXButtons ?? true;
 				this.settings.enableBrowseButtons = data.enableBrowseButtons ?? true;
 				this.settings.browseDefaultInstalled = data.browseDefaultInstalled ?? false;
+				this.settings.ctrlClickOpensGithub = data.ctrlClickOpensGithub ?? false;
+				this.foldStateCache = new Map(Object.entries(data.foldStates ?? {}));
 				this.settings.transparentNavBar = data.transparentNavBar ?? false;
 				const rawLabel = data.showTabLabel;
 				if (typeof rawLabel === 'number') this.settings.showTabLabel = rawLabel;
@@ -176,17 +249,37 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				this.settings.letterNavMode = data.letterNavMode ?? 'shift';
 				// Load search queries (with legacy support)
 				this.savedSearchQueries = data.savedSearchQueries ?? {};
-				if (data.savedSearchQuery && !this.savedSearchQueries['community-plugins']) {
+				if (data.savedSearchQuery && this.savedSearchQueries['community-plugins'] === undefined) {
 					this.savedSearchQueries['community-plugins'] = data.savedSearchQuery;
 				}
+				// Migration: older builds split the cache across two keys for the
+				// community-plugins tab — 'community-plugins' (from data-id) and
+				// 'community plugins' (from textContent fallback). Merge any stale
+				// space-form entry into the canonical hyphen-form key.
+				if (this.savedSearchQueries['community plugins'] !== undefined) {
+					if (this.savedSearchQueries['community-plugins'] === undefined) {
+						this.savedSearchQueries['community-plugins'] = this.savedSearchQueries['community plugins'];
+					}
+					delete this.savedSearchQueries['community plugins'];
+				}
 			}
-			if (data && data.history) {
+			if (data && Array.isArray(data.history)) {
 				// Clean up invalid history entries (empty strings, null, undefined)
-				this.history = data.history.filter(entry =>
-					entry &&
-					entry.tabId &&
-					typeof entry.tabId === 'string' &&
-					entry.tabId.trim().length > 0
+				// and normalize the old textContent-fallback 'community plugins' key.
+				const cleaned = data.history
+					.filter(entry =>
+						entry &&
+						entry.tabId &&
+						typeof entry.tabId === 'string' &&
+						entry.tabId.trim().length > 0
+					)
+					.map(entry => ({
+						...entry,
+						tabId: entry.tabId === 'community plugins' ? 'community-plugins' : entry.tabId,
+					}));
+				// Collapse consecutive duplicates created by the normalization
+				this.history = cleaned.filter((entry, i) =>
+					i === 0 || entry.tabId !== cleaned[i - 1].tabId || entry.searchQuery !== cleaned[i - 1].searchQuery || entry.installedQuery !== cleaned[i - 1].installedQuery
 				);
 
 				// Ensure currentIndex is valid
@@ -205,21 +298,24 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	async savePluginData() {
 		try {
 			const data: PluginData = {
-				history: this.history,
+				history: this.history.map(entry => ({ ...entry })),
 				currentIndex: this.currentIndex,
 				lastTabId: this.history.length > 0 ? this.history[this.currentIndex]?.tabId : undefined,
 				enableXButtons: this.settings.enableXButtons,
 				enableBrowseButtons: this.settings.enableBrowseButtons,
 				browseDefaultInstalled: this.settings.browseDefaultInstalled,
+				ctrlClickOpensGithub: this.settings.ctrlClickOpensGithub,
+				foldStates: Object.fromEntries(this.foldStateCache),
 				transparentNavBar: this.settings.transparentNavBar,
 				showTabLabel: this.settings.showTabLabel,
 				cacheScrollPositions: this.settings.cacheScrollPositions,
 				cacheSearchBar: this.settings.cacheSearchBar,
 				enableFirstLetterNav: this.settings.enableFirstLetterNav,
 				letterNavMode: this.settings.letterNavMode,
-				savedSearchQueries: this.savedSearchQueries,
+				savedSearchQueries: { ...this.savedSearchQueries },
 			};
-			await this.saveData(data);
+			this.saveQueue = this.saveQueue.catch(() => {}).then(() => this.saveData(data));
+			await this.saveQueue;
 		} catch (error) {
 			console.error('[Settings Nav] Error saving data:', error);
 		}
@@ -228,18 +324,18 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	private isCommunityPluginTab(tabId: string): boolean {
 		if (!tabId || tabId.startsWith('plugin:') || tabId === 'browse' || tabId.startsWith('browse:')) return false;
 		if (CORE_TAB_IDS.has(tabId)) return false;
-		const plugins = (this.app as any).plugins?.manifests;
+		const plugins = this.internalApp.plugins?.manifests;
 		if (!plugins) return false;
 		// Direct ID match
 		if (tabId in plugins) return true;
 		// Match by display name (for tabs that use textContent instead of data-id)
 		return Object.values(plugins).some(
-			(m: any) => m.name?.toLowerCase() === tabId
+			(m) => m.name?.toLowerCase() === tabId
 		);
 	}
 
 	private getPluginInfoForTab(tabId: string): { name: string; id: string } | null {
-		const plugins = (this.app as any).plugins?.manifests;
+		const plugins = this.internalApp.plugins?.manifests;
 		if (!plugins) return null;
 		// Direct ID match
 		if (tabId in plugins) {
@@ -247,20 +343,20 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		}
 		// Match by display name
 		for (const [id, manifest] of Object.entries(plugins)) {
-			if ((manifest as any).name?.toLowerCase() === tabId) {
-				return { name: (manifest as any).name.toLowerCase(), id };
+			if (manifest.name?.toLowerCase() === tabId) {
+				return { name: manifest.name.toLowerCase(), id };
 			}
 		}
 		return null;
 	}
 
 	private openPluginInBrowse(e?: MouseEvent) {
-		const doc = activeDocument || document;
+		const doc = activeDocument;
 		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
 		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
 		if (!modalContainer) return;
 
-		const modal = modalContainer.querySelector('.modal') as HTMLElement;
+		const modal = (modalContainer.matches('.modal') ? modalContainer : modalContainer.querySelector('.modal')) as HTMLElement;
 		if (!modal) return;
 
 		const activeTab = modal.querySelector('.vertical-tab-nav-item.is-active');
@@ -271,29 +367,11 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const pluginInfo = this.getPluginInfoForTab(tabId);
 		if (!pluginInfo) return;
 
-		const swapped = this.settings.browseDefaultInstalled;
-		const goToInstalled = swapped ? !(e?.shiftKey) : !!(e?.shiftKey);
-
-		if (goToInstalled) {
-			// Navigate to community-plugins tab and search for the plugin
-			const manifests = (this.app as any).plugins?.manifests;
-			const manifest = manifests?.[pluginInfo.id];
-			const displayName = manifest?.name || pluginInfo.name;
-			this.savedSearchQueries['community-plugins'] = displayName;
-			this.searchBarRestoringTabs.add('community-plugins');
-			this.searchBarRestoredTabs.add('community-plugins');
-			this.recordTabChange('community-plugins');
-			this.performNavigation('community-plugins');
-		} else {
-			// Open community browse modal on top of settings
-			this.isNavigatingProgrammatically = true;
-			window.open(`obsidian://show-plugin?id=${pluginInfo.id}`);
-			setTimeout(() => { this.isNavigatingProgrammatically = false; }, 2000);
-		}
+		void this.handlePuzzleClick(pluginInfo, e);
 	}
 
 	private ensureFloatingPane() {
-		const doc = activeDocument || document;
+		const doc = activeDocument;
 		const targetParent = doc.body;
 
 		if (this.floatingPane && this.floatingPane.parentElement === targetParent) {
@@ -301,8 +379,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		}
 
 		if (this.floatingPane) this.floatingPane.remove();
+		this.paneUi.unload();
+		this.paneUi.load();
 
-		this.floatingPane = doc.createElement('div');
+		this.floatingPane = targetParent.createDiv();
 		this.floatingPane.className = 'settings-nav-floating-pane';
 
 		this.applyNavBarStyle();
@@ -311,7 +391,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.floatingPane.addEventListener('mousedown', (e) => e.stopPropagation());
 		this.floatingPane.addEventListener('click', (e) => e.stopPropagation());
 
-		const backBtn = doc.createElement('div');
+		const backBtn = this.floatingPane.createDiv();
 		backBtn.className = 'settings-nav-float-button clickable-icon';
 		backBtn.setAttribute('aria-label', 'Go back');
 		setIcon(backBtn, 'arrow-left');
@@ -320,7 +400,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			this.navigateBack();
 		};
 
-		const forwardBtn = doc.createElement('div');
+		const forwardBtn = this.floatingPane.createDiv();
 		forwardBtn.className = 'settings-nav-float-button clickable-icon';
 		forwardBtn.setAttribute('aria-label', 'Go forward');
 		setIcon(forwardBtn, 'arrow-right');
@@ -329,92 +409,24 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			this.navigateForward();
 		};
 
-		const indicator = doc.createElement('div');
+		const indicator = this.floatingPane.createDiv();
 		indicator.className = 'settings-nav-indicator';
 
-		const separator = doc.createElement('div');
+		const separator = this.floatingPane.createDiv();
 		separator.className = 'settings-nav-separator';
 
-		const pluginInfoBtn = doc.createElement('div');
+		const pluginInfoBtn = this.floatingPane.createDiv();
 		pluginInfoBtn.className = 'settings-nav-float-button settings-nav-plugin-info-btn clickable-icon';
 		setIcon(pluginInfoBtn, 'puzzle');
 
-		// Dynamic tooltip that changes with Shift key
-		let navTooltip: HTMLElement | null = null;
-		let navIsHovering = false;
-		let navCurrentShift = false;
-
-		const getNavTooltipText = (shiftHeld: boolean) => {
-			const swapped = this.settings.browseDefaultInstalled;
-			const showInstalled = swapped ? !shiftHeld : shiftHeld;
-			return showInstalled ? 'View in installed plugins' : 'View in Community Plugins';
-		};
-
-		const positionNavTooltip = () => {
-			if (!navTooltip) return;
-			const rect = pluginInfoBtn.getBoundingClientRect();
-			const tipRect = navTooltip.getBoundingClientRect();
-			navTooltip.style.left = `${rect.left + rect.width / 2 - tipRect.width / 2}px`;
-			navTooltip.style.top = `${rect.top - tipRect.height - 4}px`;
-		};
-
-		const showNavTooltip = (text: string) => {
-			if (navTooltip) {
-				if (navTooltip.textContent !== text) {
-					navTooltip.textContent = text;
-					positionNavTooltip();
-				}
-				return;
-			}
-			navTooltip = doc.createElement('div');
-			navTooltip.className = 'tooltip mod-top';
-			navTooltip.textContent = text;
-			navTooltip.style.cssText = 'position: fixed; z-index: 2147483647; pointer-events: none;';
-			doc.body.appendChild(navTooltip);
-			positionNavTooltip();
-		};
-
-		const hideNavTooltip = () => {
-			if (navTooltip) { navTooltip.remove(); navTooltip = null; }
-		};
-
-		const updateNavShift = (ev: KeyboardEvent) => {
-			navCurrentShift = ev.shiftKey;
-			if (navIsHovering) showNavTooltip(getNavTooltipText(navCurrentShift));
-		};
-
-		pluginInfoBtn.addEventListener('mouseenter', () => {
-			navIsHovering = true;
-			showNavTooltip(getNavTooltipText(navCurrentShift));
-			doc.addEventListener('keydown', updateNavShift);
-			doc.addEventListener('keyup', updateNavShift);
-		});
-
-		pluginInfoBtn.addEventListener('mouseleave', () => {
-			navIsHovering = false;
-			hideNavTooltip();
-			doc.removeEventListener('keydown', updateNavShift);
-			doc.removeEventListener('keyup', updateNavShift);
-			navCurrentShift = false;
-		});
-
+		this.attachPuzzleTooltip(pluginInfoBtn, this.paneUi);
 		pluginInfoBtn.onclick = (e) => {
 			e.stopPropagation();
-			hideNavTooltip();
 			this.openPluginInBrowse(e);
 		};
 
-		const tabLabel = doc.createElement('div');
+		const tabLabel = this.floatingPane.createDiv();
 		tabLabel.className = 'settings-nav-tab-label';
-		tabLabel.style.cssText = `
-			font-size: 12px;
-			color: var(--text-muted);
-			white-space: nowrap;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			max-width: 200px;
-			pointer-events: none;
-		`;
 
 		this.floatingPane.appendChild(backBtn);
 		this.floatingPane.appendChild(forwardBtn);
@@ -428,190 +440,62 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	}
 
 	applyNavBarStyle() {
-		if (!this.floatingPane) return;
-
-		if (this.settings.transparentNavBar) {
-			this.floatingPane.style.cssText = `
-				display: flex !important;
-				flex-direction: row !important;
-				align-items: center !important;
-				gap: 6px !important;
-				padding: 0 !important;
-				background: transparent !important;
-				border: none !important;
-				box-shadow: none !important;
-				z-index: 2147483647 !important;
-				pointer-events: auto !important;
-				position: fixed !important;
-				visibility: visible !important;
-				opacity: 1 !important;
-			`;
-			this.floatingPane.classList.add('mod-transparent');
-		} else {
-			this.floatingPane.style.cssText = `
-				display: flex !important;
-				flex-direction: row !important;
-				align-items: center !important;
-				gap: 8px !important;
-				padding: 6px 10px !important;
-				background: color-mix(in srgb, var(--background-secondary) 60%, transparent) !important;
-				backdrop-filter: blur(8px) !important;
-				-webkit-backdrop-filter: blur(8px) !important;
-				border: 1px solid var(--background-modifier-border) !important;
-				border-radius: 8px !important;
-				box-shadow: var(--shadow-l) !important;
-				z-index: 2147483647 !important;
-				pointer-events: auto !important;
-				position: fixed !important;
-				visibility: visible !important;
-				opacity: 1 !important;
-			`;
-			this.floatingPane.classList.remove('mod-transparent');
-		}
+		this.floatingPane?.classList.toggle('mod-transparent', this.settings.transparentNavBar);
 	}
 
 	private setupNavigationTracking() {
-		const plugin = this;
-		const setting = (this.app as any).setting;
-		if (setting) {
-			const originalOpenTabById = setting.openTabById;
-			setting.openTabById = function (tabId: string) {
-				const result = originalOpenTabById.apply(this, arguments);
-				if (!plugin.isNavigatingProgrammatically) {
-					setTimeout(() => {
-						const effectiveTabId = tabId || plugin.detectTabIdFromDOM();
-						// Only record if we have a valid, non-empty tab ID
-						if (effectiveTabId && effectiveTabId.trim().length > 0) {
-							plugin.recordTabChange(effectiveTabId);
-						}
-					}, 50);
+		const setting = this.internalApp.setting;
+		if (setting?.openTab) {
+			// eslint-disable-next-line @typescript-eslint/unbound-method -- Preserve the exact method for restoration; invoke with its owning settings object.
+			const original = setting.openTab;
+			const wrapped = (tab: InternalTab) => {
+				const automatic = this.isNavigatingProgrammatically;
+				if (!automatic) {
+					this.saveCurrentView();
+					this.navigationGeneration++;
+					this.beginSearchVisit(tab.id);
 				}
-				return result;
+				original.call(setting, tab);
+				if (!automatic) this.recordTabChange(tab.id);
+				this.syncSearchBar();
 			};
+			setting.openTab = wrapped;
+			this.register(() => { if (setting.openTab === wrapped) setting.openTab = original; });
 		}
 
 		this.pollInterval = window.setInterval(() => {
-			const doc = activeDocument || document;
+			this.bindDocument(activeDocument);
 			this.ensureFloatingPane();
-
-			if (!this.floatingPane) return;
-
-			// ALWAYS look for the LAST (topmost) modal
-			const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
-			const activeModalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
-
-			if (activeModalContainer) {
-				// Hide bar if the topmost modal is a command palette / quick switcher (prompt)
-				if (activeModalContainer.querySelector('.prompt')) {
-					this.floatingPane.style.display = 'none';
-				} else {
-					let modal = activeModalContainer.querySelector('.modal, .community-modal, .mod-community-modal, .community-plugin-details, .community-plugin-search, .community-modal-details') as HTMLElement;
-
-					if (!modal) {
-						// Fallback: use the first child that isn't the background overlay
-						modal = Array.from(activeModalContainer.children).find(el => !el.classList.contains('modal-bg')) as HTMLElement;
-					}
-
-					if (modal) {
-						// Position logic...
-						const rect = modal.getBoundingClientRect();
-						const paneHeight = this.floatingPane.offsetHeight || 40;
-
-						const targetLeft = Math.round(rect.left / 10) * 10;
-						const targetTop = Math.round((rect.top - paneHeight - 10) / 10) * 10;
-
-						const currentLeft = parseInt(this.floatingPane.style.left) || 0;
-						const currentTop = parseInt(this.floatingPane.style.top) || 0;
-
-						if (Math.abs(currentLeft - targetLeft) > 5 || Math.abs(currentTop - targetTop) > 5) {
-							this.floatingPane.style.left = `${targetLeft}px`;
-							this.floatingPane.style.top = `${targetTop}px`;
-						}
-
-						this.floatingPane.style.display = 'flex';
-						this.floatingPane.style.opacity = '1';
-						this.floatingPane.style.zIndex = '2147483647';
-					} else {
-						this.floatingPane.style.display = 'none';
-					}
-				}
-			} else {
-				this.floatingPane.style.display = 'none';
-				this.searchBarRestoredTabs.clear();
+			const modal = this.getNavigationModal();
+			this.floatingPane?.classList.toggle('is-visible', !!modal);
+			if (!modal) {
+				if (this.searchVisitTab) this.beginSearchVisit('');
+				if (this.sidebarRoot) this.removeAllXButtons();
 				this.modalWasClosed = true;
+				return;
 			}
-
-			// Track tab changes only from the TOPMOST modal
-			if (activeModalContainer) {
-				// Skip recording if modal is in a transitional state (opening/closing)
-				const modal = activeModalContainer.querySelector('.modal, .community-modal, .mod-community-modal') as HTMLElement;
-				if (modal && modal.style.display === 'none') {
-					return; // Modal is hidden, don't record
-				}
-
-				const tabId = this.detectTabIdFromDOM();
-
-				// If modal just reopened, restore fold state then scroll for the current tab
-				if (this.modalWasClosed && tabId) {
-					this.modalWasClosed = false;
-					this.restoreFoldState(tabId, () => {
-						this.restoreScrollPosition(tabId);
-					});
-				}
-
-				// Only record valid, non-empty tab IDs that are different from current
-				if (tabId && tabId.trim().length > 0 && tabId !== this.lastActiveTabId && !this.isNavigatingProgrammatically) {
-					// After back/forward navigation, give a grace period before recording
-					// from the poll loop to avoid chopping forward history
-					if (Date.now() - this.lastNavActionTime < 2500) {
-						this.lastActiveTabId = tabId;
-					} else {
-						this.recordTabChange(tabId);
-					}
-				}
+			if (this.floatingPane) {
+				const rect = modal.getBoundingClientRect();
+				this.floatingPane.style.left = Math.max(0, rect.left) + 'px';
+				this.floatingPane.style.top = Math.max(0, rect.top - (this.floatingPane.offsetHeight || 40) - 10) + 'px';
 			}
-
-			// Continuously save scroll position and fold state for current tab
-			// Only save when the modal is actually open (not during close animation)
-			if (activeModalContainer && this.lastActiveTabId && this.settings.cacheScrollPositions) {
-				// Don't overwrite while a restore is in progress for this tab
-				const restoreKey = `__restoring_${this.lastActiveTabId}`;
-				if (!(this as any)[restoreKey]) {
-					const contentEl = this.getSettingsContentEl();
-					if (contentEl && contentEl.scrollTop > 0) {
-						this.scrollCache.set(this.lastActiveTabId, contentEl.scrollTop);
-					}
-				}
-				this.saveFoldState(this.lastActiveTabId);
+			this.syncSearchBar();
+			const tabId = this.detectTabIdFromDOM();
+			if (tabId && tabId !== this.lastActiveTabId && !this.isNavigatingProgrammatically) this.recordTabChange(tabId);
+			if (this.modalWasClosed && tabId) {
+				this.modalWasClosed = false;
+				this.restoreFoldState(tabId, () => this.restoreScrollPosition(tabId));
 			}
-
-			// Search bar: save/restore for tabs with search bars (community-plugins, hotkeys)
-			if (this.lastActiveTabId && this.isSearchBarTab(this.lastActiveTabId)) {
-				const tab = this.lastActiveTabId;
-				if (!this.searchBarRestoredTabs.has(tab)) {
-					this.searchBarRestoredTabs.add(tab);
-					if (this.savedSearchQueries[tab]) {
-						this.searchBarRestoringTabs.add(tab);
-						this.restoreSearchBarContent(tab);
-					}
-				} else if (!this.searchBarRestoringTabs.has(tab)) {
-					this.saveSearchBarContent(tab);
-				}
-			} else {
-				// Not on a search bar tab — clear all restore flags so they restore on next visit
-				this.searchBarRestoredTabs.clear();
-				this.searchBarRestoringTabs.clear();
-			}
-
+			this.saveCurrentView();
 			this.injectXButtons();
 			this.updateButtonStates();
 		}, 150);
 	}
 
 	private detectTabIdFromDOM(): string {
-		const doc = activeDocument || document;
+		const doc = activeDocument;
 		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
-		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
+		const modalContainer = (allModalContainers[allModalContainers.length - 1] as HTMLElement | undefined) ?? this.getNavigationModal();
 
 		if (!modalContainer) return "";
 
@@ -693,7 +577,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		if (!modal) return "";
 
 		const activeTab = modal.querySelector('.vertical-tab-nav-item.is-active');
-		const baseTabId = (activeTab?.getAttribute('data-id') || activeTab?.textContent || "").trim().toLowerCase();
+		let baseTabId = (this.internalApp.setting?.activeTab?.id || activeTab?.getAttribute('data-id') || activeTab?.textContent || "").trim().toLowerCase();
+
+		// Normalize: textContent fallback gives "community plugins" (space),
+		// data-id gives "community-plugins" (hyphen). Canonicalize to hyphen form
+		// so cache entries don't split across two keys.
+		if (baseTabId === 'community plugins') {
+			baseTabId = 'community-plugins';
+		}
 
 		if (baseTabId.includes('community-plugins') || baseTabId.includes('community plugins')) {
 			const backButton = modal.querySelector('.setting-editor-back-button');
@@ -708,13 +599,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		return baseTabId;
 	}
 
-	private recordTabChange(tabId: string) {
+	private recordTabChange(tabId: string, installedQuery?: string) {
 		// Don't record empty or invalid tab IDs
 		if (!tabId || typeof tabId !== 'string') {
 			return;
 		}
 
-		const normalizedId = tabId.trim().toLowerCase();
+		const normalizedId = this.normalizeTabId(tabId);
 
 		// Don't record empty strings
 		if (!normalizedId) {
@@ -727,16 +618,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 		// Prevent rapid-fire duplicate recordings (debounce)
 		const now = Date.now();
-		if (now - this.lastRecordTime < 300) {
-			return; // Too soon after last recording
-		}
 
 		const currentEntry = this.history[this.currentIndex];
 		const currentTabId = currentEntry?.tabId;
+		const searchQuery = this.isSearchBarTab(normalizedId) ? installedQuery ?? this.savedSearchQueries[normalizedId] ?? '' : undefined;
 
 		// 1. Strict De-duplication
 		// If the new ID is exactly the same as the current history tip, ignore it.
-		if (currentTabId === normalizedId) {
+		if (currentTabId === normalizedId && currentEntry?.searchQuery === searchQuery) {
 			this.lastActiveTabId = normalizedId;
 			return;
 		}
@@ -753,11 +642,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 				// Refinement: Current is "plugin:name", New is "plugin:name:id" -> REPLACE current
 				if (!currentHasId && newHasId) {
-					console.log(`[Settings Nav] Refinement detected: ${currentTabId} -> ${normalizedId}. Replacing entry.`);
 					this.history[this.currentIndex].tabId = normalizedId;
 					this.lastActiveTabId = normalizedId;
 					this.lastRecordTime = now;
-					this.savePluginData();
+					void this.savePluginData();
 					return;
 				}
 
@@ -774,7 +662,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		// (with search query if any) exists before the first plugin entry so back
 		// navigation returns to the correct browse state with search preserved
 		if (normalizedId.startsWith('plugin:')) {
-			const doc = activeDocument || document;
+			const doc = activeDocument;
 			const communityModal = doc.querySelector('.mod-community-modal, .mod-community-plugin');
 			if (communityModal) {
 				const searchInput = communityModal.querySelector('.search-input-container input[type="search"], .community-modal-search-container input') as HTMLInputElement;
@@ -810,16 +698,17 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.lastActiveTabId = normalizedId;
 		this.lastRecordTime = now;
 
+
 		if (this.currentIndex < this.history.length - 1) {
 			// If we are in the middle of history and navigate, chop off the future
 			this.history = this.history.slice(0, this.currentIndex + 1);
 		}
 
-		this.history.push({ tabId: normalizedId, timestamp: Date.now() });
+		this.history.push({ tabId: normalizedId, timestamp: Date.now(), installedQuery, searchQuery });
 		if (this.history.length > 50) this.history.shift();
 		this.currentIndex = this.history.length - 1;
 
-		this.savePluginData();
+		void this.savePluginData();
 		this.updateButtonStates();
 
 		// Restore fold state first, then scroll position after folds have expanded
@@ -832,6 +721,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		if (this.currentIndex <= 0) return;
 
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
+		this.saveCurrentView();
 		const startIndex = this.currentIndex;
 
 		// Skip back past invalid entries and entries matching current tab
@@ -840,11 +730,12 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
-			if (entry.tabId === currentTabId) continue;
+			if (entry.tabId === currentTabId && (entry.searchQuery ?? entry.installedQuery) === this.findSearchInput()?.value) continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
-			this.performNavigation(entry.tabId);
+			this.performNavigation(entry.tabId, entry.searchQuery ?? entry.installedQuery);
+			void this.savePluginData();
 			return;
 		}
 
@@ -857,6 +748,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		if (this.currentIndex >= this.history.length - 1) return;
 
 		const currentTabId = this.detectTabIdFromDOM() || this.lastActiveTabId || '';
+		this.saveCurrentView();
 		const startIndex = this.currentIndex;
 
 		// Skip forward past invalid entries and entries matching current tab
@@ -865,11 +757,12 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			const entry = this.history[this.currentIndex];
 			if (!entry || !entry.tabId || entry.tabId.trim().length === 0) continue;
 			// Skip if it's the same tab we're already on
-			if (entry.tabId === currentTabId) continue;
+			if (entry.tabId === currentTabId && (entry.searchQuery ?? entry.installedQuery) === this.findSearchInput()?.value) continue;
 			// Found a different, valid entry
 			this.lastNavActionTime = Date.now();
 			this.updateButtonStates();
-			this.performNavigation(entry.tabId);
+			this.performNavigation(entry.tabId, entry.searchQuery ?? entry.installedQuery);
+			void this.savePluginData();
 			return;
 		}
 
@@ -879,7 +772,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	}
 
 	private handleFirstLetterNav(letter: string, forceSidebar: boolean = true) {
-		const doc = activeDocument || document;
+		const doc = activeDocument;
 		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
 		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
 		if (!modalContainer) return;
@@ -960,16 +853,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		} else {
 			target.element.scrollIntoView({ block: 'center', behavior: 'smooth' });
 			// Brief highlight
-			target.element.style.transition = 'background 0.3s';
-			target.element.style.background = 'var(--background-modifier-hover)';
-			setTimeout(() => {
-				target.element.style.background = '';
-				setTimeout(() => { target.element.style.transition = ''; }, 300);
+			target.element.classList.add('settings-nav-highlight');
+			this.defer(() => {
+				target.element.classList.remove('settings-nav-highlight');
 			}, 800);
 		}
 	}
 
-	private performNavigation(tabId: string) {
+	private performNavigation(tabId: string, installedQuery?: string) {
 		// Validate tabId before attempting navigation
 		if (!tabId || typeof tabId !== 'string' || tabId.trim().length === 0) {
 			console.warn('[Settings Nav] Invalid tabId for navigation:', tabId);
@@ -978,9 +869,13 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			return;
 		}
 
+		this.saveCurrentView();
+		const navigation = ++this.navigationGeneration;
 		this.isNavigatingProgrammatically = true;
-		const setting = (this.app as any).setting;
-		const doc = activeDocument || document;
+		this.beginSearchVisit(tabId, installedQuery);
+		const setting = this.internalApp.setting;
+		if (!setting) { this.isNavigatingProgrammatically = false; return; }
+		const doc = activeDocument;
 
 		const getTopmostModal = () => {
 			const all = Array.from(doc.querySelectorAll('.modal-container'));
@@ -1026,18 +921,18 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 						}
 						if (!clicked && pluginId) {
 							// Fallback: use obsidian:// URI if item not found in list
-							window.open(`obsidian://show-plugin?id=${pluginId}`);
+							window.open('obsidian://show-plugin?id=' + encodeURIComponent(pluginId));
 						}
 					} else {
 						// Community modal not open — open browse first, then navigate
-						setting.openTabById('community-plugins');
-						setTimeout(() => {
+						setting?.openTabById('community-plugins');
+						this.defer(() => {
 							const newTop = getTopmostModal();
 							const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
 								.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
 							if (browseBtn) {
 								browseBtn.click();
-								setTimeout(() => this.performNavigation(tabId), 500);
+								this.defer(() => this.performNavigation(tabId), 500);
 							}
 						}, 300);
 						return;
@@ -1067,8 +962,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 					if (browseBtn) browseBtn.click();
 				} else {
 					// No modals — open settings, community plugins, then browse
-					setting.openTabById('community-plugins');
-					setTimeout(() => {
+					setting?.openTabById('community-plugins');
+					this.defer(() => {
 						const newTop = getTopmostModal();
 						const browseBtn = Array.from(newTop?.querySelectorAll('.mod-cta') || [])
 							.find(el => el.textContent?.trim().toLowerCase() === 'browse') as HTMLElement;
@@ -1089,7 +984,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 				setting.openTabById(tabId);
 
 				// Check if openTabById worked by seeing if the active tab changed
-				setTimeout(() => {
+				this.defer(() => {
+					if (navigation !== this.navigationGeneration) return;
 					const topmostModal = getTopmostModal();
 					if (!topmostModal) return;
 					const activeTab = topmostModal.querySelector('.vertical-tab-nav-item.is-active');
@@ -1104,13 +1000,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 						return elText === tabId || elText === tabIdSpaces;
 					});
 					if (match) {
-						(match as HTMLElement).click();
+						this.isNavigatingProgrammatically = true;
+						try { (match as HTMLElement).click(); this.syncSearchBar(); } finally { this.isNavigatingProgrammatically = false; }
 					}
 				}, 100);
 			}
 		} catch (e) {
 			console.warn('[Settings Nav] Navigation failed', e);
-		}
+		} finally { this.isNavigatingProgrammatically = false; }
 
 		this.lastActiveTabId = tabId;
 		this.updateButtonStates();
@@ -1119,12 +1016,9 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		this.restoreFoldState(tabId, () => {
 			this.restoreScrollPosition(tabId);
 		});
-		if (this.isSearchBarTab(tabId)) {
-			this.restoreSearchBarContent(tabId);
-		}
+		this.syncSearchBar();
 
-		// Increased timeout and reset flag to prevent re-opening loops
-		setTimeout(() => { this.isNavigatingProgrammatically = false; }, 1500);
+		this.isNavigatingProgrammatically = false;
 	}
 
 	updateButtonStates() {
@@ -1143,7 +1037,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		const pluginInfoBtn = this.floatingPane.querySelector('.settings-nav-plugin-info-btn') as HTMLElement;
 		const separatorEl = this.floatingPane.querySelector('.settings-nav-separator') as HTMLElement;
 		if (pluginInfoBtn) {
-			const doc = activeDocument || document;
+			const doc = activeDocument;
 			const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
 			const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
 			let isPluginTab = false;
@@ -1158,8 +1052,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			}
 
 			// Hide button and separator when not on a community plugin tab
-			pluginInfoBtn.style.display = isPluginTab ? 'flex' : 'none';
-			if (separatorEl) separatorEl.style.display = isPluginTab ? '' : 'none';
+			pluginInfoBtn.classList.toggle('settings-nav-hidden', !isPluginTab);
+			if (separatorEl) separatorEl.classList.toggle('settings-nav-hidden', !isPluginTab);
 		}
 
 		// Update tab label
@@ -1167,7 +1061,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		if (tabLabel) {
 			if (this.settings.showTabLabel > 0) {
 				tabLabel.style.fontSize = this.settings.showTabLabel + 'px';
-				const doc = activeDocument || document;
+				const doc = activeDocument;
 				const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
 				const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
 				let tabName = '';
@@ -1179,248 +1073,257 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 					}
 				}
 				tabLabel.textContent = tabName;
-				tabLabel.style.display = tabName ? '' : 'none';
+				tabLabel.classList.toggle('settings-nav-hidden', !tabName);
 			} else {
-				tabLabel.style.display = 'none';
+				tabLabel.classList.add('settings-nav-hidden');
 			}
 		}
 	}
 
 	private getSettingsContentEl(): HTMLElement | null {
-		const doc = activeDocument || document;
-		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
-		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
-		if (!modalContainer) return null;
-		const modal = modalContainer.querySelector('.modal') as HTMLElement;
-		if (!modal) return null;
-		return modal.querySelector('.vertical-tab-content') as HTMLElement;
+		const root = this.getNavigationModal();
+		if (!root || !root.querySelector('.vertical-tab-nav-item, .vertical-tab-header')) return null;
+		const activeContent = this.internalApp.setting?.activeTab?.containerEl;
+		if (activeContent?.isConnected && root.contains(activeContent)) return activeContent;
+		return root.querySelector<HTMLElement>('.vertical-tab-content');
 	}
 
-	private saveScrollPosition(tabId: string) {
-		if (!this.settings.cacheScrollPositions || !tabId) return;
-		const contentEl = this.getSettingsContentEl();
-		if (contentEl) {
-			this.scrollCache.set(tabId, contentEl.scrollTop);
-		}
+
+	private saveCurrentView() {
+		const tab = this.detectTabIdFromDOM();
+		if (!tab || tab !== this.lastActiveTabId || !this.settings.cacheScrollPositions) return;
+		const content = this.getSettingsContentEl();
+		if (content && !this.scrollRestoring.has(tab) && !this.foldRestoring.has(tab)) this.scrollCache.set(tab, content.scrollTop);
+		this.saveFoldState(tab);
 	}
 
 	private restoreScrollPosition(tabId: string) {
-		if (!this.settings.cacheScrollPositions || !tabId) return;
-		const savedScroll = this.scrollCache.get(tabId);
-		if (savedScroll === undefined || savedScroll === 0) return;
-
-		// Temporarily stop the poll loop from overwriting this tab's cached scroll
-		// while we're trying to restore it
-		const restoreKey = `__restoring_${tabId}`;
-		(this as any)[restoreKey] = true;
-
-		const tryRestore = (attempts: number) => {
-			const contentEl = this.getSettingsContentEl();
-			if (contentEl && contentEl.scrollHeight > contentEl.clientHeight) {
-				contentEl.scrollTop = savedScroll;
-				// Verify it took — browser may clamp to max scroll
-				if (contentEl.scrollTop > 0) {
-					(this as any)[restoreKey] = false;
-					return; // Success
-				}
-			}
-			if (attempts > 0) {
-				setTimeout(() => tryRestore(attempts - 1), 100);
-			} else {
-				(this as any)[restoreKey] = false;
-			}
+		if (!this.settings.cacheScrollPositions) return;
+		const position = this.scrollCache.get(tabId);
+		if (position === undefined) return;
+		const generation = this.viewGeneration;
+		this.scrollRestoring.add(tabId);
+		const restore = (attempts: number) => {
+			if (generation !== this.viewGeneration || this.detectTabIdFromDOM() !== tabId) { this.scrollRestoring.delete(tabId); return; }
+			const content = this.getSettingsContentEl();
+			if (content) content.scrollTop = position;
+			if (content && Math.abs(content.scrollTop - position) < 1 || attempts <= 0) this.scrollRestoring.delete(tabId);
+			else this.defer(() => restore(attempts - 1), 50);
 		};
-		setTimeout(() => tryRestore(15), 50);
+		restore(10);
 	}
 
 	private getHeadingPath(heading: HTMLElement): string {
-		// Build a path key from heading text, walking up the DOM to build ancestry
-		const text = heading.querySelector('.setting-item-name')?.textContent?.trim()
-			|| heading.textContent?.trim() || '';
-		const level = heading.getAttribute('data-level') || '0';
-		return `${level}:${text}`;
+		const parts = [heading.dataset.id || heading.querySelector('.setting-item-name')?.textContent?.trim() || ''];
+		for (let parent = heading.parentElement; parent; parent = parent.parentElement) {
+			if (parent.classList.contains('style-settings-container')) {
+				const owner = parent.previousElementSibling as HTMLElement | null;
+				if (owner?.matches('.style-settings-heading')) parts.unshift(owner.dataset.id || owner.querySelector('.setting-item-name')?.textContent?.trim() || '');
+			}
+		}
+		return parts.map(encodeURIComponent).join('/');
 	}
 
 	private saveFoldState(tabId: string) {
-		if (!this.settings.cacheScrollPositions || !tabId) return;
-		const contentEl = this.getSettingsContentEl();
-		if (!contentEl) return;
+		if (!this.settings.cacheScrollPositions || this.foldRestoring.has(tabId) || this.detectTabIdFromDOM() !== tabId) return;
+		if (this.getSettingsContentEl()?.querySelector<HTMLInputElement>('.search-input-container input')?.value) return;
+		const headings = this.getSettingsContentEl()?.querySelectorAll<HTMLElement>('.style-settings-heading');
+		if (!headings?.length) return;
+		// Collapsing a section removes its descendants from the DOM. Preserve their
+		// states so opening the parent later can recover the same nested layout.
+		const state = { ...this.foldStateCache.get(tabId) };
+		for (const heading of Array.from(headings)) state[this.getHeadingPath(heading)] = !heading.classList.contains('is-collapsed');
+		this.foldStateCache.set(tabId, state);
+	}
 
-		const headings = contentEl.querySelectorAll('.style-settings-heading');
-		if (headings.length === 0) return;
-
-		// Save ALL heading states (both collapsed and expanded) so we can
-		// detect which ones the user explicitly expanded vs default state
-		const states: { key: string; collapsed: boolean }[] = [];
-		const keyCounts = new Map<string, number>();
-		headings.forEach((h) => {
-			const baseKey = this.getHeadingPath(h as HTMLElement);
-			const count = keyCounts.get(baseKey) || 0;
-			keyCounts.set(baseKey, count + 1);
-			const key = count > 0 ? `${baseKey}#${count}` : baseKey;
-			states.push({ key, collapsed: h.classList.contains('is-collapsed') });
-		});
-		this.foldStateCache.set(tabId, states.filter(s => !s.collapsed).map(s => s.key));
+	private rememberHeadingToggle(heading: HTMLElement) {
+		const tab = this.detectTabIdFromDOM();
+		if (!this.settings.cacheScrollPositions || !this.getSettingsContentEl()?.contains(heading)) return;
+		if (this.getSettingsContentEl()?.querySelector<HTMLInputElement>('.search-input-container input')?.value) return;
+		this.viewGeneration++;
+		this.foldRestoring.delete(tab);
+		this.saveFoldState(tab);
+		const state = this.foldStateCache.get(tab) ?? {};
+		// The capture listener runs before Style Settings changes the heading.
+		state[this.getHeadingPath(heading)] = heading.classList.contains('is-collapsed');
+		this.foldStateCache.set(tab, state);
+		this.foldRestoring.add(tab);
+		this.defer(() => this.restoreFoldState(tab, () => { this.saveFoldState(tab); void this.savePluginData(); }), 0);
 	}
 
 	private restoreFoldState(tabId: string, onComplete?: () => void) {
-		if (!this.settings.cacheScrollPositions || !tabId) {
-			onComplete?.();
-			return;
-		}
-		const expandedKeys = this.foldStateCache.get(tabId);
-		if (!expandedKeys) {
-			onComplete?.();
-			return;
-		}
-
-		const expandedSet = new Set(expandedKeys);
-
-		// Restore level by level: expand top-level headings first,
-		// wait for children to render, then process the next level
-		const restoreLevel = (level: number, attempts: number) => {
-			const contentEl = this.getSettingsContentEl();
-			if (!contentEl) {
-				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
-				else onComplete?.();
-				return;
+		const saved = this.foldStateCache.get(tabId);
+		if (!saved || !this.settings.cacheScrollPositions) { onComplete?.(); return; }
+		if (this.getSettingsContentEl()?.querySelector<HTMLInputElement>('.search-input-container input')?.value) { onComplete?.(); return; }
+		const generation = this.viewGeneration;
+		this.foldRestoring.add(tabId);
+		const restore = (attempts: number) => {
+			if (generation !== this.viewGeneration || this.detectTabIdFromDOM() !== tabId || !this.foldRestoring.has(tabId)) return;
+			const content = this.getSettingsContentEl();
+			const headings = Array.from(content?.querySelectorAll<HTMLElement>('.style-settings-heading') ?? []);
+			let changed = false;
+			for (const heading of headings) {
+				if (!heading.isConnected) continue;
+				const expanded = saved[this.getHeadingPath(heading)];
+				if (expanded !== undefined && expanded === heading.classList.contains('is-collapsed')) { heading.click(); changed = true; }
 			}
-
-			const headings = contentEl.querySelectorAll('.style-settings-heading');
-			if (headings.length === 0) {
-				if (attempts > 0) setTimeout(() => restoreLevel(level, attempts - 1), 100);
-				else onComplete?.();
-				return;
-			}
-
-			let clickedAny = false;
-			const keyCounts = new Map<string, number>();
-
-			headings.forEach((h) => {
-				const el = h as HTMLElement;
-				const headingLevel = parseInt(el.getAttribute('data-level') || '0');
-				if (headingLevel !== level) return;
-
-				const baseKey = this.getHeadingPath(el);
-				const count = keyCounts.get(baseKey) || 0;
-				keyCounts.set(baseKey, count + 1);
-				const key = count > 0 ? `${baseKey}#${count}` : baseKey;
-
-				const shouldExpand = expandedSet.has(key);
-				const isCollapsed = el.classList.contains('is-collapsed');
-
-				if (shouldExpand && isCollapsed) {
-					el.click();
-					clickedAny = true;
-				} else if (!shouldExpand && !isCollapsed) {
-					el.click();
-					clickedAny = true;
-				}
-			});
-
-			// If we expanded any headings, wait for children to render, then do next level
-			if (clickedAny && level < 6) {
-				setTimeout(() => restoreLevel(level + 1, 5), 150);
-			} else if (level < 6) {
-				// Check if there are deeper levels to process
-				const hasDeeper = Array.from(headings).some(h =>
-					parseInt((h as HTMLElement).getAttribute('data-level') || '0') > level
-				);
-				if (hasDeeper) {
-					restoreLevel(level + 1, 5);
-				} else {
-					onComplete?.();
-				}
-			} else {
-				onComplete?.();
-			}
+			if (attempts > 0 && (changed || !headings.length)) this.defer(() => restore(attempts - 1), changed ? 0 : 50);
+			else { this.foldRestoring.delete(tabId); onComplete?.(); }
 		};
-
-		setTimeout(() => restoreLevel(0, 10), 100);
+		restore(20);
 	}
 
-	private findSearchInput(): HTMLInputElement | null {
-		const doc = activeDocument || document;
-		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
-		const modalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
-		if (!modalContainer) return null;
-		const modal = modalContainer.querySelector('.modal') as HTMLElement;
-		if (!modal) return null;
-
-		const contentEl = modal.querySelector('.vertical-tab-content');
-		if (!contentEl) return null;
-
-		const inputs = Array.from(contentEl.querySelectorAll('input')) as HTMLInputElement[];
-		return inputs.find(i =>
-			i.type === 'text' || i.type === 'search' || i.type === ''
-		) || null;
+	private normalizeTabId(tabId: string): string {
+		const id = tabId.trim().toLowerCase();
+		return id === 'community plugins' ? 'community-plugins' : id === 'core plugins' ? 'core-plugins' : id;
 	}
 
-	private saveSearchBarContent(tabId?: string) {
-		if (!this.settings.cacheSearchBar) return;
-		const tab = tabId || this.lastActiveTabId || '';
-		const searchInput = this.findSearchInput();
-		if (searchInput) {
-			const newValue = searchInput.value;
-			if (newValue !== this.savedSearchQueries[tab]) {
-				this.savedSearchQueries[tab] = newValue;
-				this.savePluginData();
-			}
+	private getNavigationModal(): HTMLElement | null {
+		const settings = this.internalApp.setting?.containerEl;
+		const settingsModal = settings?.matches('.modal') ? settings : settings?.querySelector<HTMLElement>('.modal') ?? settings;
+		const containers = Array.from(activeDocument.querySelectorAll<HTMLElement>('.modal-container'));
+		const top = containers[containers.length - 1];
+		if (top) {
+			if (top.querySelector('.prompt')) return null;
+			if (settingsModal?.isConnected && top.contains(settingsModal)) return settingsModal;
+			const modal = top.querySelector<HTMLElement>(':scope > .modal');
+			return modal?.matches('.mod-community-modal, .mod-community-plugin') ? modal : null;
+		}
+		// Obsidian 1.13 may open settings in its own window.
+		return settingsModal?.isConnected && settingsModal.ownerDocument === activeDocument ? settingsModal : null;
+	}
+
+	private isSnippetName(el: HTMLElement): boolean {
+		return Platform.isDesktopApp && this.detectTabIdFromDOM() === 'appearance'
+			&& !!this.getSettingsContentEl()?.contains(el)
+			&& !!this.internalApp.customCss?.snippets.includes(el.textContent?.trim() ?? '');
+	}
+
+	private async openSnippet(name: string) {
+		const css = this.internalApp.customCss;
+		if (!Platform.isDesktopApp || !css?.snippets.includes(name) || !this.internalApp.openWithDefaultApp) return;
+		try { await this.internalApp.openWithDefaultApp(css.getSnippetPath(name)); }
+		catch { new Notice('Could not open the snippet in the default app.'); }
+	}
+
+	private openInstalledPlugin(info: { name: string; id: string }) {
+		const query = this.internalApp.plugins?.manifests[info.id]?.name || info.name;
+		this.isNavigatingProgrammatically = false;
+		this.recordTabChange('community-plugins', query);
+		this.performNavigation('community-plugins', query);
+	}
+
+	private beginSearchVisit(tabId: string, query?: string) {
+		this.searchGeneration++;
+		this.viewGeneration++;
+		this.foldRestoring.clear();
+		this.scrollRestoring.clear();
+		this.restoredSearchInput = null;
+		this.searchVisitTab = this.normalizeTabId(tabId);
+		this.temporaryInstalledQuery = query;
+	}
+
+	private findSearchInput(tabId = this.detectTabIdFromDOM()): HTMLInputElement | null {
+		if (!this.isSearchBarTab(tabId) || this.detectTabIdFromDOM() !== tabId) return null;
+		const content = this.getSettingsContentEl();
+		return content?.querySelector<HTMLInputElement>('.installed-plugins-container .search-input-container input, .setting-group-search input, .hotkey-filter input, .search-input-container input, input[type="search"]') ?? null;
+	}
+
+	private captureSearchEdit(target: EventTarget | null) {
+		const tab = this.detectTabIdFromDOM();
+		const input = this.findSearchInput(tab);
+		if (!input || input !== target) return;
+		this.searchGeneration++;
+		this.searchVisitTab = tab;
+		this.restoredSearchInput = input;
+		this.temporaryInstalledQuery = input.value;
+		const entry = this.history[this.currentIndex];
+		if (entry?.tabId === tab) { entry.searchQuery = input.value; delete entry.installedQuery; }
+		if (this.settings.cacheSearchBar) this.savedSearchQueries[tab] = input.value;
+		void this.savePluginData();
+	}
+
+	private syncSearchBar() {
+		if (this.unloaded) return;
+		const tab = this.detectTabIdFromDOM();
+		if (tab !== this.searchVisitTab) {
+			if (this.isNavigatingProgrammatically) return;
+			this.beginSearchVisit(tab);
+		}
+		const input = this.findSearchInput(tab);
+		if (!input || input === this.restoredSearchInput) return;
+		this.restoredSearchInput = input;
+		const query = this.temporaryInstalledQuery ?? (this.settings.cacheSearchBar ? this.savedSearchQueries[tab] : undefined);
+		if (query !== undefined && input.value !== query) {
+			input.value = query;
+			input.dispatchEvent(new (input.ownerDocument.defaultView ?? window).Event('input', { bubbles: true }));
 		}
 	}
 
-	private restoreSearchBarContent(tabId?: string) {
-		const tab = tabId || this.lastActiveTabId || '';
-		const query = this.savedSearchQueries[tab];
-		if (!this.settings.cacheSearchBar || !query) {
-			this.searchBarRestoringTabs.delete(tab);
-			return;
-		}
+	private attachPuzzleTooltip(button: HTMLElement, scope: Component) {
+		this.attachModifierTooltip(button, scope, e => this.settings.ctrlClickOpensGithub && (e.ctrlKey || e.metaKey) ? 'Open plugin on GitHub'
+			: (this.settings.browseDefaultInstalled !== e.shiftKey ? 'View in installed plugins' : 'View in community plugins'));
+	}
 
-		const queryToRestore = query;
-
-		// Keep trying to set the value until it sticks.
-		// Obsidian re-renders the plugin list on input events, recreating the input element.
-		// We repeatedly check and re-apply until stable.
-		let stableCount = 0;
-		const ensureValue = (attempts: number) => {
-			const input = this.findSearchInput();
-			if (!input) {
-				if (attempts > 0) setTimeout(() => ensureValue(attempts - 1), 100);
-				else this.searchBarRestoringTabs.delete(tab);
-				return;
-			}
-
-			if (input.value === queryToRestore) {
-				stableCount++;
-				// Consider it stable after 3 consecutive checks (~450ms)
-				if (stableCount >= 3) {
-					this.searchBarRestoringTabs.delete(tab);
-					return;
-				}
-			} else {
-				stableCount = 0;
-				input.value = queryToRestore;
-				input.dispatchEvent(new Event('input', { bubbles: true }));
-			}
-
-			if (attempts > 0) {
-				setTimeout(() => ensureValue(attempts - 1), 150);
-			} else {
-				this.searchBarRestoringTabs.delete(tab);
-			}
+	private attachModifierTooltip(button: HTMLElement, scope: Component, label: (e: MouseEvent | KeyboardEvent) => string, destructive = false) {
+		let hovered = false;
+		const update = (e: MouseEvent | KeyboardEvent) => {
+			if (!hovered && button.ownerDocument.activeElement !== button) return;
+			const text = label(e);
+			button.classList.toggle('shift-held', destructive && text === 'Delete plugin');
+			setTooltip(button, text, { delay: 0 });
+			displayTooltip(button, text, { delay: 0 });
 		};
-		setTimeout(() => ensureValue(20), 100);
+		scope.registerDomEvent(button, 'mouseenter', e => { hovered = true; update(e); });
+		scope.registerDomEvent(button, 'mouseleave', () => { hovered = false; button.classList.remove('shift-held'); });
+		scope.registerDomEvent(button, 'blur', () => button.classList.remove('shift-held'));
+		scope.registerDomEvent(button.ownerDocument, 'keydown', update);
+		scope.registerDomEvent(button.ownerDocument, 'keyup', update);
+	}
+
+	private async handlePuzzleClick(info: { name: string; id: string }, e?: MouseEvent) {
+		if (this.settings.ctrlClickOpensGithub && (e?.ctrlKey || e?.metaKey)) { await this.openPluginGithub(info.id); return; }
+		if (this.settings.browseDefaultInstalled !== !!e?.shiftKey) this.openInstalledPlugin(info);
+		else window.open('obsidian://show-plugin?id=' + encodeURIComponent(info.id));
+	}
+
+	private async openPluginGithub(id: string) {
+		try {
+			if (!this.githubRepos) {
+				const response = await requestUrl('https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/community-plugins.json');
+				const entries: unknown = response.json;
+				if (!Array.isArray(entries)) throw new Error('Invalid community plugin directory');
+				this.githubRepos = new Map();
+				for (const item of entries as unknown[]) {
+					if (!item || typeof item !== 'object') continue;
+					const entry = item as { id?: unknown; repo?: unknown };
+					if (typeof entry.id === 'string' && typeof entry.repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(entry.repo)) this.githubRepos.set(entry.id, entry.repo);
+				}
+			}
+			if (this.unloaded) return;
+			const repo = this.githubRepos.get(id);
+			if (!repo) { new Notice('This plugin has no repository in the community directory.'); return; }
+			window.open('https://github.com/' + repo);
+		} catch (error) { console.error('Settings Navigator: repository lookup failed', error); new Notice('Could not look up the plugin repository. Check your connection and try again.'); }
+	}
+
+	private defer(callback: () => void, delay: number): number {
+		const timer = window.setTimeout(() => {
+			this.timers.delete(timer);
+			if (!this.unloaded) callback();
+		}, delay);
+		this.timers.add(timer);
+		return timer;
 	}
 
 	private injectXButtons() {
-		const doc = activeDocument || document;
-		const allModalContainers = Array.from(doc.querySelectorAll('.modal-container'));
-		const activeModalContainer = allModalContainers[allModalContainers.length - 1] as HTMLElement;
-		if (!activeModalContainer) return;
-
-		const modal = activeModalContainer.querySelector('.modal') as HTMLElement;
-		if (!modal) return;
+		const modal = this.getNavigationModal();
+		const sidebar = modal?.querySelector<HTMLElement>('.vertical-tab-header');
+		if (!modal || !sidebar) return;
+		if (this.sidebarRoot !== sidebar) {
+			this.removeAllXButtons();
+			this.sidebarRoot = sidebar;
+		}
 
 		// Make "Core plugins" and "Community plugins" section headers clickable
 		const headers = modal.querySelectorAll('.vertical-tab-header-group-title');
@@ -1432,9 +1335,10 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			if (text.includes('core plugins')) targetTabId = 'core-plugins';
 			else if (text.includes('community plugins')) targetTabId = 'community-plugins';
 			if (targetTabId) {
-				headerEl.style.cursor = 'pointer';
+				headerEl.classList.add('settings-nav-clickable-heading');
+				this.ui.register(() => headerEl.classList.remove('settings-nav-clickable-heading'));
 				const tabId = targetTabId;
-				headerEl.addEventListener('click', (e) => {
+				this.ui.registerDomEvent(headerEl, 'click', (e) => {
 					e.stopPropagation();
 					this.recordTabChange(tabId);
 					this.performNavigation(tabId);
@@ -1473,16 +1377,14 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 			// Check if it's a core plugin or community plugin
 			const isCommunity = this.isCommunityPluginTab(tabId);
 
-			// If it's not a community plugin and has no data-id, check if it's actually
-			// a core plugin by verifying it exists in internalPlugins
-			const isCorePlugin = !isCommunity && !dataId
-				? !!(this.app as any).internalPlugins?.getPluginById(tabId)
-				: !isCommunity && !CORE_TAB_IDS.has(tabId);
+			const coreId = !isCommunity ? corePluginId(this.internalApp, tabId) : null;
+			const isCorePlugin = coreId !== null;
 
 			// Only add buttons for actual plugin tabs
 			if (!isCommunity && !isCorePlugin) return;
 
-			navItem.style.position = 'relative';
+			navItem.classList.add('settings-nav-plugin-item');
+			this.ui.register(() => navItem.classList.remove('settings-nav-plugin-item'));
 
 			// Add browse button (to the left of X) for community plugins
 			if (isCommunity && this.settings.enableBrowseButtons) {
@@ -1491,7 +1393,7 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 
 			// Add X button
 			if (this.settings.enableXButtons) {
-				this.createXButton(navItem, tabId, isCommunity);
+				this.createXButton(navItem, coreId ?? tabId, isCommunity);
 			}
 
 			this.injectedXButtons.add(navItem);
@@ -1499,239 +1401,59 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 	}
 
 	private createXButton(navItem: HTMLElement, tabId: string, isCommunity: boolean) {
-		const xButton = document.createElement('div');
-		xButton.className = 'settings-nav-x-button';
-		setIcon(xButton, 'x');
-
-		// Custom tooltip element that we control directly
-		let tooltip: HTMLElement | null = null;
-
-		const positionTooltip = () => {
-			if (!tooltip) return;
-			const rect = xButton.getBoundingClientRect();
-			const tipRect = tooltip.getBoundingClientRect();
-			tooltip.style.left = `${rect.left + rect.width / 2 - tipRect.width / 2}px`;
-			tooltip.style.top = `${rect.top - tipRect.height - 4}px`;
-		};
-
-		const showTooltip = (text: string, isDelete: boolean = false) => {
-			if (tooltip) {
-				if (tooltip.textContent !== text) {
-					tooltip.textContent = text;
-					tooltip.style.color = isDelete ? 'var(--text-error)' : '';
-					positionTooltip();
-				}
-				return;
-			}
-			tooltip = document.createElement('div');
-			tooltip.className = 'tooltip mod-top';
-			tooltip.textContent = text;
-			tooltip.style.cssText = 'position: fixed; z-index: 2147483647; pointer-events: none;';
-			if (isDelete) tooltip.style.color = 'var(--text-error)';
-			document.body.appendChild(tooltip);
-			positionTooltip();
-		};
-
-		const hideTooltip = () => {
-			if (tooltip) {
-				tooltip.remove();
-				tooltip = null;
-			}
-		};
-
-		const getTooltipText = (shiftHeld: boolean, ctrlHeld: boolean) => {
-			if (ctrlHeld) return 'Reload plugin';
-			if (shiftHeld && isCommunity) return 'Delete plugin';
-			return 'Disable plugin';
-		};
-
-		let isHoveringX = false;
-		let currentShift = false;
-
-		let currentCtrl = false;
-
-		xButton.addEventListener('mouseenter', () => {
-			isHoveringX = true;
-			showTooltip(getTooltipText(currentShift, currentCtrl), currentShift && isCommunity);
+		const button = navItem.createDiv({ cls: 'settings-nav-x-button clickable-icon' });
+		button.setAttribute('role', 'button'); button.tabIndex = 0;
+		setIcon(button, 'x'); setTooltip(button, 'Disable plugin');
+		this.attachModifierTooltip(button, this.ui, e => e.ctrlKey ? 'Reload plugin' : e.shiftKey && isCommunity ? 'Delete plugin' : 'Disable plugin', true);
+		this.ui.registerDomEvent(button, 'click', (e) => {
+			e.stopPropagation(); e.preventDefault();
+			if (e.ctrlKey) void this.reloadPlugin(tabId, isCommunity);
+			else if (e.shiftKey && isCommunity) void this.handleDeletePlugin(tabId);
+			else void this.handleDisablePlugin(tabId, isCommunity);
 		});
-
-		xButton.addEventListener('mouseleave', () => {
-			isHoveringX = false;
-			hideTooltip();
-		});
-
-		xButton.addEventListener('click', (e: MouseEvent) => {
-			e.stopPropagation();
-			e.preventDefault();
-			hideTooltip();
-			if (e.ctrlKey) {
-				// Ctrl+Click: reload plugin (disable then re-enable)
-				const plugins = (this.app as any).plugins;
-				if (isCommunity) {
-					const pluginInfo = this.getPluginInfoForTab(tabId);
-					if (pluginInfo) {
-						plugins.disablePlugin(pluginInfo.id).then(() => {
-							setTimeout(() => plugins.enablePlugin(pluginInfo.id), 500);
-						});
-					}
-				} else {
-					const internalPlugin = (this.app as any).internalPlugins?.getPluginById(tabId);
-					if (internalPlugin) {
-						internalPlugin.disable();
-						setTimeout(() => internalPlugin.enable(), 500);
-					}
-				}
-			} else if (e.shiftKey && isCommunity) {
-				this.handleDeletePlugin(tabId);
-			} else {
-				this.handleDisablePlugin(tabId, isCommunity);
-			}
-		});
-
-		// Track shift/ctrl keys for visual feedback and tooltip update
-		const updateModifierState = (e: KeyboardEvent) => {
-			currentCtrl = e.ctrlKey;
-			currentShift = e.shiftKey;
-			if (isCommunity) xButton.classList.toggle('shift-held', currentShift && !currentCtrl);
-			if (isHoveringX) {
-				showTooltip(getTooltipText(currentShift, currentCtrl), currentShift && !currentCtrl && isCommunity);
-			}
-		};
-
-		navItem.addEventListener('mouseenter', () => {
-			document.addEventListener('keydown', updateModifierState);
-			document.addEventListener('keyup', updateModifierState);
-		});
-
-		navItem.addEventListener('mouseleave', () => {
-			document.removeEventListener('keydown', updateModifierState);
-			document.removeEventListener('keyup', updateModifierState);
-			xButton.classList.remove('shift-held');
-			currentShift = false;
-			currentCtrl = false;
-			hideTooltip();
-		});
-
-		navItem.appendChild(xButton);
+		this.ui.registerDomEvent(button, 'keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); button.click(); } });
+		this.ui.register(() => button.remove());
 	}
 
 	private createBrowseButton(navItem: HTMLElement, tabId: string) {
-		const browseBtn = document.createElement('div');
-		browseBtn.className = 'settings-nav-browse-button';
-		setIcon(browseBtn, 'puzzle');
-
-		// Custom tooltip
-		let tooltip: HTMLElement | null = null;
-		let isHovering = false;
-		let currentShift = false;
-
-		const positionTooltip = () => {
-			if (!tooltip) return;
-			const rect = browseBtn.getBoundingClientRect();
-			const tipRect = tooltip.getBoundingClientRect();
-			tooltip.style.left = `${rect.left + rect.width / 2 - tipRect.width / 2}px`;
-			tooltip.style.top = `${rect.top - tipRect.height - 4}px`;
-		};
-
-		const getTooltipText = (shiftHeld: boolean) => {
-			const swapped = this.settings.browseDefaultInstalled;
-			const showInstalled = swapped ? !shiftHeld : shiftHeld;
-			return showInstalled ? 'View in installed plugins' : 'View in Community Plugins';
-		};
-
-		const showTooltip = (text: string) => {
-			if (tooltip) {
-				if (tooltip.textContent !== text) {
-					tooltip.textContent = text;
-					positionTooltip();
-				}
-				return;
-			}
-			tooltip = document.createElement('div');
-			tooltip.className = 'tooltip mod-top';
-			tooltip.textContent = text;
-			tooltip.style.cssText = 'position: fixed; z-index: 2147483647; pointer-events: none;';
-			document.body.appendChild(tooltip);
-			positionTooltip();
-		};
-
-		const hideTooltip = () => {
-			if (tooltip) { tooltip.remove(); tooltip = null; }
-		};
-
-		browseBtn.addEventListener('mouseenter', () => {
-			isHovering = true;
-			showTooltip(getTooltipText(currentShift));
+		const button = navItem.createDiv({ cls: 'settings-nav-browse-button clickable-icon' });
+		button.setAttribute('role', 'button'); button.tabIndex = 0;
+		setIcon(button, 'puzzle'); this.attachPuzzleTooltip(button, this.ui);
+		this.ui.registerDomEvent(button, 'click', e => {
+			e.stopPropagation(); e.preventDefault();
+			const info = this.getPluginInfoForTab(tabId);
+			if (info) void this.handlePuzzleClick(info, e);
 		});
+		this.ui.registerDomEvent(button, 'keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); button.click(); } });
+		this.ui.register(() => button.remove());
+	}
 
-		browseBtn.addEventListener('mouseleave', () => {
-			isHovering = false;
-			hideTooltip();
-		});
-
-		const updateShiftState = (e: KeyboardEvent) => {
-			currentShift = e.shiftKey;
-			if (isHovering) {
-				showTooltip(getTooltipText(currentShift));
-			}
-		};
-
-		navItem.addEventListener('mouseenter', () => {
-			document.addEventListener('keydown', updateShiftState);
-			document.addEventListener('keyup', updateShiftState);
-		});
-
-		navItem.addEventListener('mouseleave', () => {
-			document.removeEventListener('keydown', updateShiftState);
-			document.removeEventListener('keyup', updateShiftState);
-			currentShift = false;
-			hideTooltip();
-		});
-
-		browseBtn.addEventListener('click', (e: MouseEvent) => {
-			e.stopPropagation();
-			e.preventDefault();
-			hideTooltip();
-
-			const pluginInfo = this.getPluginInfoForTab(tabId);
-			if (!pluginInfo) return;
-
-			const swapped = this.settings.browseDefaultInstalled;
-			const goToInstalled = swapped ? !e.shiftKey : e.shiftKey;
-
-			if (goToInstalled) {
-				// Navigate to community-plugins tab and search for the plugin
-				// Set the search override BEFORE navigating so the poll loop
-				// doesn't fight us with the old saved query
-				const manifests = (this.app as any).plugins?.manifests;
-				const manifest = manifests?.[pluginInfo.id];
-				const displayName = manifest?.name || pluginInfo.name;
-				this.savedSearchQueries['community-plugins'] = displayName;
-				this.searchBarRestoringTabs.add('community-plugins');
-				this.searchBarRestoredTabs.add('community-plugins');
-				this.recordTabChange('community-plugins');
-				this.performNavigation('community-plugins');
+	private async reloadPlugin(tabId: string, isCommunity: boolean) {
+		try {
+			if (isCommunity) {
+				const info = this.getPluginInfoForTab(tabId);
+				const plugins = this.internalApp.plugins;
+				if (!info || !plugins) return;
+				await plugins.disablePlugin(info.id);
+				await plugins.enablePlugin(info.id);
 			} else {
-				// Open in Community Plugins browser — keep settings open behind it
-				this.isNavigatingProgrammatically = true;
-				window.open(`obsidian://show-plugin?id=${pluginInfo.id}`);
-				setTimeout(() => { this.isNavigatingProgrammatically = false; }, 2000);
+				const plugin = this.internalApp.internalPlugins?.getPluginById(tabId);
+				plugin?.disable(false);
+				await plugin?.enable(false);
 			}
-		});
-
-		navItem.appendChild(browseBtn);
+		} catch (error) { console.error('Settings Navigator: reload failed', error); new Notice('Could not reload the plugin.'); }
 	}
 
 	private async handleDisablePlugin(tabId: string, isCommunity: boolean) {
-		const plugins = (this.app as any).plugins;
-		const setting = (this.app as any).setting;
+		const plugins = this.internalApp.plugins;
+		const setting = this.internalApp.setting;
 
 		if (isCommunity) {
 			const pluginInfo = this.getPluginInfoForTab(tabId);
 			if (pluginInfo) {
 				try {
-					await plugins.disablePlugin(pluginInfo.id);
-					setting.openTabById('community-plugins');
+					await plugins?.disablePluginAndSave(pluginInfo.id);
+					setting?.openTabById('community-plugins');
 				} catch (error) {
 					console.error('[Settings Nav] Failed to disable plugin:', error);
 				}
@@ -1739,8 +1461,8 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		} else {
 			// Core plugin — disable by tab ID
 			try {
-				await (this.app as any).internalPlugins?.getPluginById(tabId)?.disable();
-				setting.openTabById('core-plugins');
+				this.internalApp.internalPlugins?.getPluginById(tabId)?.disable(true);
+				setting?.openTabById('core-plugins');
 			} catch (error) {
 				console.error('[Settings Nav] Failed to disable core plugin:', error);
 			}
@@ -1752,184 +1474,30 @@ export default class SettingsBackAndForthPlugin extends Plugin {
 		if (!pluginInfo) return;
 
 		try {
-			const plugins = (this.app as any).plugins;
-			await plugins.uninstallPlugin(pluginInfo.id);
-			(this.app as any).setting.openTabById('community-plugins');
+			const plugins = this.internalApp.plugins;
+			await plugins?.uninstallPlugin(pluginInfo.id);
+			this.internalApp.setting?.openTabById('community-plugins');
 		} catch (error) {
 			console.error('[Settings Nav] Failed to uninstall plugin:', error);
 		}
 	}
 
 	removeAllXButtons() {
-		const doc = activeDocument || document;
-		doc.querySelectorAll('.settings-nav-x-button').forEach(btn => btn.remove());
-		doc.querySelectorAll('.settings-nav-browse-button').forEach(btn => btn.remove());
+		this.ui.unload();
+		this.ui.load();
+		this.sidebarRoot = null;
 		this.injectedXButtons = new WeakSet();
 	}
 
 	onunload() {
-		if (this.pollInterval) clearInterval(this.pollInterval);
+		this.unloaded = true;
+		this.searchGeneration++;
+		for (const timer of this.timers) window.clearTimeout(timer);
+		this.timers.clear();
+		if (this.pollInterval) window.clearInterval(this.pollInterval);
 		if (this.floatingPane) this.floatingPane.remove();
-		if (this.keydownHandler) document.removeEventListener('keydown', this.keydownHandler, true);
-		if (this.mouseHandler) {
-			document.removeEventListener('mousedown', this.mouseHandler, true);
-			document.removeEventListener('mouseup', this.mouseHandler, true);
-			document.removeEventListener('auxclick', this.mouseHandler, true);
-		}
-		this.removeAllXButtons();
-	}
-}
-
-class SettingsNavigatorSettingTab extends PluginSettingTab {
-	plugin: SettingsBackAndForthPlugin;
-
-	constructor(app: App, plugin: SettingsBackAndForthPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-
-		// --- Navigation Bar ---
-		containerEl.createEl('h3', { text: 'Navigation Bar' });
-
-		new Setting(containerEl)
-			.setName('Show tab name')
-			.setDesc('Display the current settings tab name on the navigation bar. 0 = off, 12–24 = font size.')
-			.addSlider(slider => slider
-				.setLimits(0, 24, 1)
-				.setValue(this.plugin.settings.showTabLabel)
-				.setDynamicTooltip()
-				.onChange(async (value) => {
-					this.plugin.settings.showTabLabel = value;
-					await this.plugin.savePluginData();
-					this.plugin.updateButtonStates();
-				}));
-
-		new Setting(containerEl)
-			.setName('Transparent navigation bar')
-			.setDesc('Make the navigation bar background transparent. Each button gets its own background and border.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.transparentNavBar)
-				.onChange(async (value) => {
-					this.plugin.settings.transparentNavBar = value;
-					await this.plugin.savePluginData();
-					this.plugin.applyNavBarStyle();
-				}));
-
-		// --- Sidebar Buttons ---
-		containerEl.createEl('h3', { text: 'Sidebar Buttons' });
-
-		new Setting(containerEl)
-			.setName('Quick disable/reload/delete button')
-			.setDesc('Show X buttons on plugin tabs in the settings sidebar. Click to disable, Ctrl+Click to reload (disable then re-enable), Shift+Click to delete.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableXButtons)
-				.onChange(async (value) => {
-					this.plugin.settings.enableXButtons = value;
-					await this.plugin.savePluginData();
-					if (!value) {
-						this.plugin.removeAllXButtons();
-					}
-				}));
-
-		let browseDefaultSetting: Setting | null = null;
-
-		const updateBrowseDefaultVisibility = () => {
-			if (browseDefaultSetting) {
-				browseDefaultSetting.settingEl.style.display = this.plugin.settings.enableBrowseButtons ? '' : 'none';
-			}
-		};
-
-		new Setting(containerEl)
-			.setName('Browse in Community Plugins buttons')
-			.setDesc('Show a puzzle icon on community plugin tabs to quickly view them in the Community Plugins browser.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableBrowseButtons)
-				.onChange(async (value) => {
-					this.plugin.settings.enableBrowseButtons = value;
-					await this.plugin.savePluginData();
-					if (!value) {
-						this.plugin.removeAllXButtons();
-					}
-					updateBrowseDefaultVisibility();
-				}));
-
-		browseDefaultSetting = new Setting(containerEl)
-			.setName('Browse button defaults to installed plugins')
-			.setDesc('Swap the browse button behavior: normal click opens installed plugin settings, Shift+click opens in Community Plugins browser.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.browseDefaultInstalled)
-				.onChange(async (value) => {
-					this.plugin.settings.browseDefaultInstalled = value;
-					await this.plugin.savePluginData();
-				}));
-
-		updateBrowseDefaultVisibility();
-
-		// --- Persistence ---
-		containerEl.createEl('h3', { text: 'Persistence' });
-
-		new Setting(containerEl)
-			.setName('Remember scroll positions')
-			.setDesc('Cache scroll positions for each settings tab and restore them when navigating back.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.cacheScrollPositions)
-				.onChange(async (value) => {
-					this.plugin.settings.cacheScrollPositions = value;
-					await this.plugin.savePluginData();
-				}));
-
-		new Setting(containerEl)
-			.setName('Remember search filters')
-			.setDesc('Persist search bar text on community plugins and hotkeys tabs across settings sessions.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.cacheSearchBar)
-				.onChange(async (value) => {
-					this.plugin.settings.cacheSearchBar = value;
-					await this.plugin.savePluginData();
-					if (!value) {
-						this.plugin.savedSearchQueries = {};
-						await this.plugin.savePluginData();
-					}
-				}));
-
-		// --- First-Letter Navigation ---
-		containerEl.createEl('h3', { text: 'First-Letter Navigation' });
-
-		let letterNavModeSetting: Setting | null = null;
-
-		const updateLetterNavModeVisibility = () => {
-			if (letterNavModeSetting) {
-				letterNavModeSetting.settingEl.style.display = this.plugin.settings.enableFirstLetterNav ? '' : 'none';
-			}
-		};
-
-		new Setting(containerEl)
-			.setName('Enable first-letter navigation')
-			.setDesc('Press a letter key to jump to matching items in the sidebar and plugin lists. Press again to cycle through matches.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableFirstLetterNav)
-				.onChange(async (value) => {
-					this.plugin.settings.enableFirstLetterNav = value;
-					await this.plugin.savePluginData();
-					updateLetterNavModeVisibility();
-				}));
-
-		letterNavModeSetting = new Setting(containerEl)
-			.setName('Navigation mode')
-			.setDesc('How to switch between sidebar and content navigation.')
-			.addDropdown(dropdown => dropdown
-				.addOption('tab', 'Ctrl+Tab toggles focus')
-				.addOption('shift', 'Shift+letter for sidebar')
-				.setValue(this.plugin.settings.letterNavMode)
-				.onChange(async (value) => {
-					this.plugin.settings.letterNavMode = value as 'tab' | 'shift';
-					await this.plugin.savePluginData();
-				}));
-
-		updateLetterNavModeVisibility();
+		this.eventDocuments.clear();
+		this.ui.unload();
+		this.paneUi.unload();
 	}
 }
