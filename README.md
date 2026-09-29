@@ -12,7 +12,6 @@ Navigate Obsidian settings with Back and Forward, manage plugins from the sideba
 - Click a puzzle button to open the community plugin browser. Shift+click shows that plugin in the installed list. The default action can be reversed in this plugin's settings.
 - Enable **Control-click opens GitHub** to open a plugin's repository with Ctrl+click (Cmd+click on macOS) on either puzzle button.
 - Click a CSS snippet name in Appearance settings to edit it in the default desktop app. Snippet toggles retain their normal action.
-- Modifier tooltips update immediately, and Shift highlights only the hovered X.
 - Click the Core plugins or Community plugins sidebar heading to return to that list.
 - First-letter navigation cycles matching items. Shift+letter targets the sidebar by default; an optional mode uses Ctrl+Tab to switch focus.
 
