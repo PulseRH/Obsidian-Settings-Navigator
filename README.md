@@ -2,8 +2,6 @@
 
 Navigate Obsidian settings with Back and Forward, manage plugins from the sidebar, and remember searches and expanded sections.
 
-![vertical expand on hover](https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExNmwzaTh3eXVtOHk5YWQwNHFmYWFxeHg3M2d3MmM0YWhmY3Q1bjZkcyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/tXEd5QMz5zqtBc1Boh/giphy.gif)
-
 ## Usage
 
 - Use the floating arrows or mouse side buttons to move through settings history.
