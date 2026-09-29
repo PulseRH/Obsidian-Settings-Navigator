@@ -2,6 +2,8 @@
 
 Navigate Obsidian settings with Back and Forward, manage plugins from the sidebar, and remember searches and expanded sections.
 
+<img width="352" height="73" alt="image" src="https://github.com/user-attachments/assets/986c0005-a2e4-4d54-bda6-1ec006aa64af" />      <a href='https://ko-fi.com/Q5Q21SW0YU' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+
 ## Usage
 
 - Use the floating arrows or mouse side buttons to move through settings history.
