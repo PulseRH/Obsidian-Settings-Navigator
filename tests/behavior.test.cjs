@@ -196,15 +196,18 @@ test('plugin settings-like dialogs cannot claim the navigation bar', () => {
   overlay.innerHTML='<div class="modal mod-community-modal"></div>'; assert.ok(p.getNavigationModal());
 });
 
-test('snippet name opens the known CSS path; other settings and controls do not', async () => {
-  const {p, setting, content} = fixture(); let opened;
+test('snippet name opens on consecutive clicks; other settings and controls do not', async () => {
+  const {p, setting, content, doc} = fixture(); const opened=[];
   p.app.customCss={snippets:['example'],getSnippetPath:n=>'custom-config/snippets/'+n+'.css'};
-  p.app.openWithDefaultApp=async path=>{opened=path;};
+  p.app.openWithDefaultApp=async path=>{opened.push(path);};
   setting.openTabById('appearance'); content.innerHTML='<div class="setting-item-name">example</div><button>Toggle</button>';
   assert.equal(p.isSnippetName(content.firstElementChild),true);
-  await p.openSnippet('example'); assert.equal(opened,'custom-config/snippets/example.css');
-  await p.openSnippet('../unknown'); assert.equal(opened,'custom-config/snippets/example.css');
+  p.bindDocument(doc);
+  content.firstElementChild.click(); content.firstElementChild.click();
+  assert.deepEqual(opened,['custom-config/snippets/example.css','custom-config/snippets/example.css']);
+  await p.openSnippet('../unknown'); assert.equal(opened.length,2);
   setting.activeTab.id='other'; assert.equal(p.isSnippetName(content.firstElementChild),false);
+  p.unload();
 });
 
 test('native settings outer container positions the toolbar relative to its modal', () => {

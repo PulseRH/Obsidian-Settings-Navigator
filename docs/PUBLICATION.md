@@ -1,4 +1,4 @@
-# Community publication preparation — 1.1.1
+# Community publication preparation — 1.1.2
 
 ## Changes
 
@@ -13,7 +13,7 @@
 
 ## Release files
 
-The GitHub tag must be exactly `1.1.1`, matching `manifest.json` and `package.json`. Attach `main.js`, `manifest.json`, and `styles.css` as individual assets. A ZIP is convenient for manual installation but does not replace these attachments. Commit the source, license, README and `versions.json` to the default branch.
+The GitHub tag must be exactly `1.1.2`, matching `manifest.json` and `package.json`. Attach `main.js`, `manifest.json`, and `styles.css` as individual assets. A ZIP is convenient for manual installation but does not replace these attachments. Commit the source, license, README and `versions.json` to the default branch.
 
 The source is MIT licensed. Runtime code has no telemetry or automatic installer/updater. Network use is optional and documented in the README. Development dependencies are excluded from the bundle.
 
@@ -21,14 +21,14 @@ The source is MIT licensed. Runtime code has no telemetry or automatic installer
 
 Run `npm ci` and `npm run build:check`. The lint script enables the official recommended Obsidian rules and treats warnings as failures. One narrowly documented `unbound-method` exception preserves a wrapped host method's identity so it can be restored exactly on unload; it is invoked with its original receiver.
 
-Automated DOM tests exercise history snapshots, cleared/temporary searches, input replacement, rapid navigation, core plugin controls, mouse event sequences, GitHub modifiers, handler cleanup and nested Style Settings headings. These are simulations of the host interfaces, not live Obsidian UI verification.
+Automated DOM tests exercise history snapshots, cleared/temporary searches, input replacement, rapid navigation, core plugin controls, mouse event sequences, GitHub modifiers, handler cleanup, nested Style Settings headings, and consecutive snippet clicks. These are simulations of the host interfaces, not live Obsidian UI verification.
 
 Live Windows checks on Obsidian 1.13.7 passed for per-visit installed-plugin searches, hover-only Shift feedback, immediate tooltip changes, toolbar positioning, and mouse event sequences. Clicking a real CSS snippet opened its file in the configured VS Code editor. The toolbar stayed hidden on Notebook Navigator 3.3.5 release notes and returned after unrelated dialogs closed. Mouse events were injected into the live DOM; physical mouse hardware and mobile remain manual checks.
 
 ## Remaining before submitting
 
 1. Verify in a test vault on supported Obsidian versions, including desktop settings windows and mobile. Check the six core X buttons, nested Style Settings folding, repeated Back/Forward searches, and real mouse buttons. Confirm disabling/reloading this plugin removes the toolbar and leaves no duplicate handlers.
-2. Publish the source and release assets to the repository with the matching tag. The source changes are prepared for pushing; a tagged GitHub release still needs to be created.
+2. Create a GitHub release tagged `1.1.2` and attach the three individual assets from `release/1.1.2/`.
 3. Submit through the Obsidian Community directory with the owner's linked GitHub account. Address the directory scanner/reviewer feedback; passing local lint does not guarantee acceptance.
 
 ## Official references
